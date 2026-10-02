@@ -32,7 +32,7 @@ def ok(text: str) -> bool:
 
 
 def main(paths: list[str]) -> int:
-    bad = [p for p in paths if not ok(text_of(Path(p)))]
+    bad = [p for p in paths if not Path(p).is_file() or not ok(text_of(Path(p)))]
     for p in bad:
         print(f"MISSING LEGEND: {p}")
     return 1 if bad else 0
