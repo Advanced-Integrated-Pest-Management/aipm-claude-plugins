@@ -1,6 +1,6 @@
 # Advanced IPM Claude Code plugins
 
-Private plugin marketplace for Advanced IPM's Claude Code users. It is rolled out org-wide through server-managed settings, so users don't install anything themselves.
+Plugin marketplace for Advanced IPM's Claude Code users. It is rolled out org-wide through server-managed settings, so users don't install anything themselves.
 
 | Plugin | What it does |
 |---|---|
@@ -18,7 +18,7 @@ Private plugin marketplace for Advanced IPM's Claude Code users. It is rolled ou
 }
 ```
 
-Users need read access to this repo. Users also need `python3` on their machines, because the guard's checker uses it.
+Users need `python3` on their machines, because the guard's checker uses it.
 
 ## Develop
 
