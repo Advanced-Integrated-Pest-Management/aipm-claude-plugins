@@ -1,0 +1,16 @@
+{
+  "name": "aipm",
+  "owner": {
+    "name": "Advanced Integrated Pest Management, Inc."
+  },
+  "metadata": {
+    "description": "Advanced IPM internal Claude Code plugins"
+  },
+  "plugins": [
+    {
+      "name": "aipm-compliance",
+      "source": "./plugins/aipm-compliance",
+      "description": "Confidentiality legend rule for every AI-made Advanced IPM deliverable, checked before hand-off"
+    }
+  ]
+}
