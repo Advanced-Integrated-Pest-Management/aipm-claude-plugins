@@ -1,6 +1,6 @@
 import type { Register } from 'claude-code'
 
-// Must match skills/confidential-legend/SKILL.md and bin/check_legend.py.
+// Must match skills/confidential-legend/SKILL.md and skills/confidential-legend/scripts/check_legend.py.
 const LEGEND = /CONFIDENTIAL\s*[–—-]\s*FOR INTERNAL USE ONLY|AIPM-CONFIDENTIAL-INTERNAL|aipm-audience:\s*external/i
 const HTML = /\.html?$/i
 const DELIVERABLE = /\.(html?|docx|pptx|xlsx|pdf)$/i
@@ -13,7 +13,7 @@ const why = (paths: string[]) =>
 async function gate($: any, paths: string[], e: any, next: any) {
   const files = paths.filter(p => DELIVERABLE.test(p))
   if (!files.length) return next(e)
-  const r = await $.process.run(['python3', `${$.plugin.root}/bin/check_legend.py`, ...files])
+  const r = await $.process.run(['python3', `${$.plugin.root}/skills/confidential-legend/scripts/check_legend.py`, ...files])
   if (r.exitCode === 0) return next(e)
   const missing = r.stdout.split('\n').filter(Boolean).map((l: string) => l.replace('MISSING LEGEND: ', ''))
   return { deny: why(missing.length ? missing : files) }

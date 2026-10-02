@@ -5,7 +5,7 @@ description: Required confidentiality legend for every Advanced IPM document, PD
 
 # Advanced IPM confidentiality legend
 
-<!-- TODO(remediate): wording revised 2026-10-02 (entity name, "may contain", Employee Handbook); pending final counsel sign-off. Privilege markings are out of scope — Compliance owns those. -->
+<!-- Wording approved by Compliance 2026-10-02. Privilege markings are out of scope; Compliance owns those. -->
 
 Every Advanced IPM deliverable you create is **internal by default** and must carry the legend. Build it in while generating the file — do not add it afterwards by hand.
 
@@ -43,7 +43,7 @@ Use the exact heading string `CONFIDENTIAL – FOR INTERNAL USE ONLY`. The foote
 Before telling the user the file is done, run:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/bin/check_legend.py" <output files...>
+python3 <this skill's folder>/scripts/check_legend.py <output files...>
 ```
 
-If it prints `MISSING LEGEND`, fix the generator and regenerate. The aipm-compliance guard runs the same check when you send or publish a file and blocks it if the check fails.
+If it prints `MISSING LEGEND`, fix the generator and regenerate. In Claude Code, the aipm-compliance guard runs the same check when you send or publish a file and blocks it if the check fails.
