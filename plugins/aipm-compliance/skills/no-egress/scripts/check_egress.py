@@ -23,6 +23,9 @@ REQUIRED_CSP = {"default-src": "'none'", "connect-src": "'none'", "form-action":
 # Every CSP source token must be one of these or exactly https://<allowed host>; nothing else is accepted.
 CSP_KEYWORDS = {"'none'", "'unsafe-inline'", "data:", "blob:"}
 HYPERLINK_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+ASCII_WS = re.compile(r"[\t\n\f\r ]+")  # the browser's CSP tokenizer splits on ASCII whitespace only
+DIRECTIVE = re.compile(r"^[A-Za-z0-9-]+$")
 BANNED_JS = re.compile(
     r"\bfetch\s*\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon|serviceWorker|"
     r"localStorage|sessionStorage|indexedDB|document\.cookie|\bcaches\.|"
@@ -55,7 +58,7 @@ class Scan(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.bad, self.csp, self.referrer, self.in_script, self.in_style = [], None, None, False, False
-        self.csp_count, self.fetched, self.head_closed = 0, False, False
+        self.csp_count, self.other_seen, self.stack = 0, False, []  # stack of open non-void elements
 
     def fail(self, msg):
         self.bad.append(f"line {self.getpos()[0]}: {msg}")
@@ -68,19 +71,21 @@ class Scan(HTMLParser):
                 self.csp_count += 1
                 if self.csp_count > 1:
                     self.fail("more than one Content-Security-Policy meta tag")
-                elif self.fetched or self.head_closed:
-                    self.fail("Content-Security-Policy meta must be in <head> before any script, link, style or media element")
+                elif self.other_seen or self.stack[-1:] != ["head"] or self.stack[:-1] not in ([], ["html"]):
+                    self.fail("Content-Security-Policy meta must be a direct child of <head>, before any element other than <meta> or <title>")
                 self.csp = a.get("content", "")
             if a.get("name", "").lower() == "referrer":
                 self.referrer = a.get("content", "").strip().lower()
             if a.get("http-equiv", "").lower() == "refresh" and "url=" in a.get("content", "").lower():
                 self.fail("meta refresh to a URL")
+        if tag not in ("html", "head", "meta", "title"):
+            self.other_seen = True  # an implicit <body>, a <link>, a <noscript> wrapper: anything the CSP must precede
+        if tag not in VOID:
+            self.stack.append(tag)
         if tag == "script":
             self.in_script = True
         if tag == "style":
             self.in_style = True
-        if tag in ("script", "style", "body") or tag in {t for t, _ in FETCH_ATTRS}:
-            self.fetched = True  # anything from here on is loaded before a later CSP meta could apply
         for k, v in a.items():
             if k.startswith("on") and BANNED_JS.search(v):
                 self.fail(f"inline {k} handler uses a network or storage API")
@@ -114,10 +119,12 @@ class Scan(HTMLParser):
             self.in_script = False
         if tag == "style":
             self.in_style = False
-        if tag == "head":
-            self.head_closed = True
+        if tag in self.stack:
+            del self.stack[len(self.stack) - 1 - self.stack[::-1].index(tag):]
 
     def handle_data(self, data):
+        if self.csp is None and data.strip() and self.stack[-1:] != ["title"]:
+            self.other_seen = True  # non-whitespace text before the CSP means the body has started
         if self.in_script and (m := BANNED_JS.search(data)):
             self.fail(f"script uses {m.group(0).strip()} (network or storage API)")
         if self.in_style:
@@ -135,12 +142,16 @@ class Scan(HTMLParser):
 def check_csp(csp):
     if csp is None:
         return ["no <meta http-equiv=\"Content-Security-Policy\"> tag"]
+    if not all(0x20 <= ord(c) < 0x7F or c in "\t\n\f\r" for c in csp):
+        return ["CSP contains non-ASCII or control characters"]
     bad, d = [], {}
     for part in csp.split(";"):
-        toks = part.split()
-        if not toks:
+        toks = ASCII_WS.split(part.strip("\t\n\f\r "))
+        if toks == [""]:
             continue
         name = toks[0].lower()
+        if not DIRECTIVE.match(name):
+            bad.append(f"CSP directive name {name!r} is malformed"); continue
         if name in d:  # browsers keep the first occurrence; a repeat is either a mistake or an attempt to confuse
             bad.append(f"CSP repeats {name}")
         d.setdefault(name, toks[1:])
@@ -266,13 +277,24 @@ def main(argv):
 
 
 def selftest():
-    good = """<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src data: https://fonts.gstatic.com; img-src data: blob:; connect-src 'none'; form-action 'none'">
-<meta name="referrer" content="no-referrer">
+    csp_meta = """<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src data: https://fonts.gstatic.com; img-src data: blob:; connect-src 'none'; form-action 'none'">"""
+    head_rest = """<meta name="referrer" content="no-referrer"><title>t</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw" crossorigin="anonymous"></script>
-<img src="data:image/png;base64,iVBORw0KGgo="><a href="https://clypboard.com" rel="noopener noreferrer">x</a>
-<script>const a=new Blob(["x"]);const u=URL.createObjectURL(a);</script>"""
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw" crossorigin="anonymous"></script>"""
+    body = """<body><img src="data:image/png;base64,iVBORw0KGgo="><a href="https://clypboard.com" rel="noopener noreferrer">x</a>
+<script>const a=new Blob(["x"]);const u=URL.createObjectURL(a);</script></body>"""
+    good = f'<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">{csp_meta}{head_rest}</head>{body}</html>'
     assert check_html(good) == [], check_html(good)
+    assert check_html(f"<head>{csp_meta}{head_rest}</head>{body}") == []  # no <html> wrapper is fine
+    for placement in (f"{csp_meta}{head_rest}{body}",                                   # no explicit <head>
+                      f"<html><head><noscript>{csp_meta}</noscript>{head_rest}</head>{body}</html>",
+                      f"<html><head><template>{csp_meta}</template>{head_rest}</head>{body}</html>",
+                      f"<html><head><svg>{csp_meta}</svg>{head_rest}</head>{body}</html>",
+                      f"<html><head>{head_rest}{csp_meta}</head>{body}</html>",          # after a <link>
+                      f"<html><head>hello{csp_meta}{head_rest}</head>{body}</html>",      # text before it
+                      f"<html><head>{head_rest}</head>{body}{csp_meta}</html>"):         # in the body
+        out = check_html(placement)
+        assert any("direct child of <head>" in b for b in out), (placement[:60], out)
     bad = check_html(open(sys.argv[2]).read()) if len(sys.argv) > 2 else []
     cases = {
         '<script src="https://cdnjs.cloudflare.com/x.js"></script>': "needs integrity",
@@ -297,10 +319,11 @@ def selftest():
     assert any("allows 'self'" in b for b in check_csp(base + "script-src 'self'"))
     dup = check_csp(base + "script-src https://unpkg.com; script-src https://evil.example")
     assert any("repeats script-src" in b for b in dup) and any("allows https://evil.example" in b for b in dup), dup
-    two = check_html(good + '\n<meta http-equiv="Content-Security-Policy" content="default-src *">')
+    two = check_html(good.replace("</head>", '<meta http-equiv="Content-Security-Policy" content="default-src *"></head>'))
     assert any("more than one" in b for b in two), two
-    late = check_html('<script>1</script>' + good)
-    assert any("before any script" in b for b in late), late
+    assert check_csp(base + "script-src https://unpkg.com https://evil.example") == ["CSP contains non-ASCII or control characters"]
+    assert any("allows src" in b for b in check_csp(base + "script src https://unpkg.com"))  # unknown directive, stray token rejected
+    assert any("malformed" in b for b in check_csp(base + "script-src/x https://unpkg.com"))
     assert pdf_names_decoded(b"/J#61vaScript /Launc#68") == b"/JavaScript /Launch"
     assert PDF_ACTION.search(pdf_names_decoded(b"<< /S /J#61vaScript >>"))
     rels = b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">%s</Relationships>'
