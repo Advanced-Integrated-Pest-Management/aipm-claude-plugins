@@ -70,4 +70,4 @@ It downloads the file, checks it against the hash the provider itself publishes,
 python3 <this skill's folder>/scripts/check_egress.py <output files...>
 ```
 
-Each `EGRESS:` line names the file, line and rule. Fix the generator and regenerate; do not hand-edit the output. In Claude Code the aipm-compliance guard runs the same check when the file is written (HTML), sent or published, and blocks it if the check fails.
+Each `EGRESS:` line names the file, line and rule. Fix the generator and regenerate; do not hand-edit the output. If it says a PDF "cannot be verified", the PDF uses object streams or encryption: install `qpdf` (`brew install qpdf`) and rerun, or regenerate the PDF without them. In Claude Code the aipm-compliance guard runs the same check when the file is written (HTML), sent or published, and blocks it if the check fails.
