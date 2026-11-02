@@ -115,9 +115,13 @@ class Scan(HTMLParser):
                 self.fail(f"<{tag} {attr}> points at {h}; images and media must be inline data: URIs")
 
     def handle_startendtag(self, tag, attrs):
-        # <meta charset/> is fine; a self-closed non-void element (<title/>) is a start tag the browser leaves open.
+        # <meta charset/> is fine. Outside inline SVG/MathML, a self-closed non-void element (<script/>, <title/>) is a start
+        # tag the browser leaves open, so what follows would run as script while this parser saw text: reject it.
+        foreign = bool({"svg", "math"} & set(self.stack))
         self.handle_starttag(tag, attrs)
-        if tag not in VOID:
+        if tag not in VOID and not foreign:
+            self.fail(f"<{tag}/> self-closing syntax on a non-void element; the browser leaves it open")
+        elif foreign and tag not in VOID:
             self.handle_endtag(tag)
 
     def handle_endtag(self, tag):
@@ -324,7 +328,10 @@ def selftest():
         '<script src="lib.js"></script>': "self-contained",
         '<meta http-equiv="Content-Security-Policy" content="default-src *">': "CSP",
         '<div onclick="fetch(1)"></div>': "inline onclick",
+        '<script/>fetch(1)</script>': "self-closing syntax",
+        '<style/>.x{background:url(https://x.example/a.png)}</style>': "self-closing syntax",
     }
+    assert not [b for b in check_html(good.replace("<body>", '<body><svg viewBox="0 0 1 1"><circle r="1"/><path d="M0 0"/></svg>')) if "self-closing" in b]
     for html, needle in cases.items():
         out = "\n".join(check_html(html))
         assert needle in out, (html, out)
