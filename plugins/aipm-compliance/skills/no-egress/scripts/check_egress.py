@@ -9,6 +9,7 @@ ImportData or GoToR actions. Stdlib only, so it runs in claude.ai's sandbox too.
 Usage: check_egress.py [--exempt-account EMAIL] [--stdin NAME] FILE...
 """
 import json, os, re, shutil, subprocess, sys, zipfile
+import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -19,6 +20,9 @@ FONT_HOSTS = {"fonts.googleapis.com", "fonts.gstatic.com"}
 ALLOWED_HOSTS = CDN_HOSTS | FONT_HOSTS
 SRI = re.compile(r"^sha(256|384|512)-[A-Za-z0-9+/]+={0,2}$")
 REQUIRED_CSP = {"default-src": "'none'", "connect-src": "'none'", "form-action": "'none'"}
+# Every CSP source token must be one of these or exactly https://<allowed host>; nothing else is accepted.
+CSP_KEYWORDS = {"'none'", "'unsafe-inline'", "data:", "blob:"}
+HYPERLINK_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
 BANNED_JS = re.compile(
     r"\bfetch\s*\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon|serviceWorker|"
     r"localStorage|sessionStorage|indexedDB|document\.cookie|\bcaches\.|"
@@ -50,7 +54,8 @@ def host_of(url: str):
 class Scan(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.bad, self.csp, self.referrer, self.in_script, self.in_style, self.line = [], None, None, False, False, 0
+        self.bad, self.csp, self.referrer, self.in_script, self.in_style = [], None, None, False, False
+        self.csp_count, self.fetched, self.head_closed = 0, False, False
 
     def fail(self, msg):
         self.bad.append(f"line {self.getpos()[0]}: {msg}")
@@ -60,6 +65,11 @@ class Scan(HTMLParser):
         rel = a.get("rel", "").lower().split()
         if tag == "meta":
             if a.get("http-equiv", "").lower() == "content-security-policy":
+                self.csp_count += 1
+                if self.csp_count > 1:
+                    self.fail("more than one Content-Security-Policy meta tag")
+                elif self.fetched or self.head_closed:
+                    self.fail("Content-Security-Policy meta must be in <head> before any script, link, style or media element")
                 self.csp = a.get("content", "")
             if a.get("name", "").lower() == "referrer":
                 self.referrer = a.get("content", "").strip().lower()
@@ -69,6 +79,8 @@ class Scan(HTMLParser):
             self.in_script = True
         if tag == "style":
             self.in_style = True
+        if tag in ("script", "style", "body") or tag in {t for t, _ in FETCH_ATTRS}:
+            self.fetched = True  # anything from here on is loaded before a later CSP meta could apply
         for k, v in a.items():
             if k.startswith("on") and BANNED_JS.search(v):
                 self.fail(f"inline {k} handler uses a network or storage API")
@@ -102,6 +114,8 @@ class Scan(HTMLParser):
             self.in_script = False
         if tag == "style":
             self.in_style = False
+        if tag == "head":
+            self.head_closed = True
 
     def handle_data(self, data):
         if self.in_script and (m := BANNED_JS.search(data)):
@@ -124,17 +138,19 @@ def check_csp(csp):
     bad, d = [], {}
     for part in csp.split(";"):
         toks = part.split()
-        if toks:
-            d[toks[0].lower()] = toks[1:]
+        if not toks:
+            continue
+        name = toks[0].lower()
+        if name in d:  # browsers keep the first occurrence; a repeat is either a mistake or an attempt to confuse
+            bad.append(f"CSP repeats {name}")
+        d.setdefault(name, toks[1:])
+        for s in toks[1:]:
+            if s in CSP_KEYWORDS or (s.startswith("https://") and s[8:] in ALLOWED_HOSTS):
+                continue
+            bad.append(f"CSP {name} allows {s}; only 'none', 'unsafe-inline', data:, blob: and https://<allowed provider> are accepted")
     for k, v in REQUIRED_CSP.items():
         if d.get(k) != [v]:
             bad.append(f"CSP must set {k} {v}")
-    for k, srcs in d.items():
-        for s in srcs:
-            if s in ("*", "https:", "http:") or s.startswith("http:"):
-                bad.append(f"CSP {k} allows {s}")
-            elif s.startswith("https://") and (urlsplit(s).hostname or "") not in ALLOWED_HOSTS:
-                bad.append(f"CSP {k} allows {s}, not an allowed provider")
     return bad
 
 
@@ -147,9 +163,25 @@ def check_html(text):
     return bad
 
 
-OOXML_LINK = re.compile(r"<Relationship\b[^>]*>", re.I)
 OOXML_BAD_PARTS = re.compile(r"^(xl/(connections\.xml|queryTables/|externalLinks/|webextensions/)|.*vbaProject\.bin|.*vbaData\.xml)")
 FIELD = re.compile(r"INCLUDEPICTURE|INCLUDETEXT|IMPORT\b|\bLINK\b|\bDDE(AUTO)?\b", re.I)
+
+
+def check_rels(n: str, data: bytes):
+    """External relationships other than plain hyperlinks (linked images, OLE, external workbooks, templates)."""
+    if re.search(rb"<!(DOCTYPE|ENTITY)", data, re.I):  # a .rels part never needs a DTD; refuse entity tricks before parsing
+        return [f"{n}: relationships part declares a DTD or entities"]
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError as e:
+        return [f"{n}: unparseable relationships ({e})"]
+    bad = []
+    for rel in root.iter():
+        if rel.tag.rsplit("}", 1)[-1] != "Relationship":
+            continue
+        if rel.get("TargetMode") == "External" and rel.get("Type") != HYPERLINK_REL:
+            bad.append(f"{n}: external {rel.get('Type', '?').rsplit('/', 1)[-1]} -> {rel.get('Target', '?')}")
+    return bad
 
 
 def check_ooxml(p: Path):
@@ -159,10 +191,7 @@ def check_ooxml(p: Path):
             if OOXML_BAD_PARTS.match(n):
                 bad.append(f"{n}: external data connection or macro part")
             if n.endswith(".rels"):
-                for rel in OOXML_LINK.findall(z.read(n).decode("utf-8", "ignore")):
-                    if 'TargetMode="External"' in rel and "/hyperlink" not in rel:
-                        t = re.search(r'Target="([^"]*)"', rel)
-                        bad.append(f"{n}: external {re.search(r'/relationships/(\w+)', rel).group(1)} -> {t.group(1) if t else '?'}")
+                bad += check_rels(n, z.read(n))
             if n.startswith("word/") and n.endswith(".xml"):
                 xml = z.read(n).decode("utf-8", "ignore")
                 for m in re.finditer(r"<w:instrText[^>]*>([^<]*)</w:instrText>", xml):
@@ -174,13 +203,21 @@ def check_ooxml(p: Path):
 PDF_ACTION = re.compile(rb"/(JavaScript|JS|Launch|SubmitForm|ImportData|GoToR|RichMedia)\b")
 
 
+def pdf_names_decoded(raw: bytes) -> bytes:
+    """PDF names may hex-escape characters (/J#61vaScript); normalise so the pattern can't be dodged."""
+    return re.sub(rb"#([0-9A-Fa-f]{2})", lambda m: bytes([int(m.group(1), 16)]), raw)
+
+
 def check_pdf(p: Path):
-    raw = p.read_bytes()
-    # ponytail: compressed object streams hide names; decompress with qpdf when it is installed.
+    raw = pdf_names_decoded(p.read_bytes())
+    # Object streams hide dictionaries from a raw scan; expand them with qpdf, or fail closed without it.
     if shutil.which("qpdf"):
-        r = subprocess.run(["qpdf", "--qdf", "--object-streams=disable", str(p), "-"], capture_output=True)
-        if r.returncode == 0:
-            raw = r.stdout
+        r = subprocess.run(["qpdf", "--qdf", "--object-streams=disable", "--decrypt", str(p), "-"], capture_output=True)
+        if r.returncode != 0:
+            return [f"qpdf could not expand the PDF (exit {r.returncode}); cannot verify it"]
+        raw = pdf_names_decoded(r.stdout)
+    elif b"/ObjStm" in raw or b"/Encrypt" in raw:
+        return ["PDF uses object streams or encryption and qpdf is not installed; cannot verify it"]
     return sorted({f"PDF action /{m.group(1).decode()}" for m in PDF_ACTION.finditer(raw)})
 
 
@@ -252,9 +289,26 @@ def selftest():
     for html, needle in cases.items():
         out = "\n".join(check_html(html))
         assert needle in out, (html, out)
-    assert check_csp("default-src 'none'; connect-src 'none'; form-action 'none'; script-src https://unpkg.com") == []
-    assert any("allows https://x.example" in b for b in check_csp("default-src 'none'; connect-src 'none'; form-action 'none'; img-src https://x.example"))
-    assert check_pdf.__name__ and check_ooxml.__name__
+    base = "default-src 'none'; connect-src 'none'; form-action 'none'; "
+    assert check_csp(base + "script-src 'unsafe-inline' https://unpkg.com; img-src data: blob:") == []
+    assert any("allows https://x.example" in b for b in check_csp(base + "img-src https://x.example"))
+    assert any("allows cdnjs.cloudflare.com" in b for b in check_csp(base + "img-src cdnjs.cloudflare.com"))  # scheme-less
+    assert any("allows https://cdnjs.cloudflare.com.evil.example" in b for b in check_csp(base + "script-src https://cdnjs.cloudflare.com.evil.example"))
+    assert any("allows 'self'" in b for b in check_csp(base + "script-src 'self'"))
+    dup = check_csp(base + "script-src https://unpkg.com; script-src https://evil.example")
+    assert any("repeats script-src" in b for b in dup) and any("allows https://evil.example" in b for b in dup), dup
+    two = check_html(good + '\n<meta http-equiv="Content-Security-Policy" content="default-src *">')
+    assert any("more than one" in b for b in two), two
+    late = check_html('<script>1</script>' + good)
+    assert any("before any script" in b for b in late), late
+    assert pdf_names_decoded(b"/J#61vaScript /Launc#68") == b"/JavaScript /Launch"
+    assert PDF_ACTION.search(pdf_names_decoded(b"<< /S /J#61vaScript >>"))
+    rels = b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">%s</Relationships>'
+    assert check_rels("r", rels % f'<Relationship Id="a" Type="{HYPERLINK_REL}" Target="https://x" TargetMode="External"/>'.encode()) == []
+    assert check_rels("r", rels % f'<Relationship Id="a" Type="{HYPERLINK_REL}X" Target="https://x" TargetMode="External"/>'.encode())
+    assert check_rels("r", rels % b'<Relationship Id="a" Type="http://s/image" Target="https://x" TargetMode="External"/>')
+    assert check_rels("r", rels % b'<Relationship Id="a" Type="http://s/image" Target="https://x" targetmode="External"/>') == []  # attribute names are case-sensitive in OOXML
+    assert check_rels("r", b'<!DOCTYPE x [<!ENTITY a "b">]>' + rels % b"")
     print("selftest ok")
 
 
