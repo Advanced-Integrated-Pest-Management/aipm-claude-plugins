@@ -19,7 +19,7 @@ Applies with the confidential-legend skill. Exempt: nothing by file. In Claude C
 <meta name="referrer" content="no-referrer">
 ```
 
-The CSP is the runtime guard: even if a stray reference slips through, the reader's browser refuses it. Do not widen it.
+The CSP is the runtime guard: even if a stray reference slips through, the reader's browser refuses it. Do not widen it. The CSP meta must be the first element in `<head>` after the charset meta; `<title>` and everything else come after it.
 
 ### Allowed providers
 

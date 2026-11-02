@@ -71,15 +71,15 @@ class Scan(HTMLParser):
                 self.csp_count += 1
                 if self.csp_count > 1:
                     self.fail("more than one Content-Security-Policy meta tag")
-                elif self.other_seen or self.stack[-1:] != ["head"] or self.stack[:-1] not in ([], ["html"]):
-                    self.fail("Content-Security-Policy meta must be a direct child of <head>, before any element other than <meta> or <title>")
+                elif self.other_seen or self.stack not in (["head"], ["html", "head"]):
+                    self.fail("Content-Security-Policy meta must be the first element in <head>, after an optional <meta charset>")
                 self.csp = a.get("content", "")
             if a.get("name", "").lower() == "referrer":
                 self.referrer = a.get("content", "").strip().lower()
             if a.get("http-equiv", "").lower() == "refresh" and "url=" in a.get("content", "").lower():
                 self.fail("meta refresh to a URL")
-        if tag not in ("html", "head", "meta", "title"):
-            self.other_seen = True  # an implicit <body>, a <link>, a <noscript> wrapper: anything the CSP must precede
+        if self.csp is None and not (tag in ("html", "head") or (tag == "meta" and set(a) <= {"charset"})):
+            self.other_seen = True  # before the CSP only <html>, <head> and <meta charset> may open; anything else disqualifies it
         if tag not in VOID:
             self.stack.append(tag)
         if tag == "script":
@@ -115,6 +115,8 @@ class Scan(HTMLParser):
                 self.fail(f"<{tag} {attr}> points at {h}; images and media must be inline data: URIs")
 
     def handle_endtag(self, tag):
+        if self.csp is None and tag not in VOID:
+            self.other_seen = True  # any real end tag (including a self-closed non-void element) before the CSP disqualifies it
         if tag == "script":
             self.in_script = False
         if tag == "style":
@@ -123,8 +125,8 @@ class Scan(HTMLParser):
             del self.stack[len(self.stack) - 1 - self.stack[::-1].index(tag):]
 
     def handle_data(self, data):
-        if self.csp is None and data.strip() and self.stack[-1:] != ["title"]:
-            self.other_seen = True  # non-whitespace text before the CSP means the body has started
+        if self.csp is None and data.strip("\t\n\f\r "):  # HTML whitespace only; a non-breaking space is text
+            self.other_seen = True  # text before the CSP means the body has started
         if self.in_script and (m := BANNED_JS.search(data)):
             self.fail(f"script uses {m.group(0).strip()} (network or storage API)")
         if self.in_style:
@@ -286,15 +288,21 @@ def selftest():
     good = f'<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">{csp_meta}{head_rest}</head>{body}</html>'
     assert check_html(good) == [], check_html(good)
     assert check_html(f"<head>{csp_meta}{head_rest}</head>{body}") == []  # no <html> wrapper is fine
+    assert check_html(f"<html>\n\t<head>\f<meta charset=utf-8>\r\n{csp_meta}{head_rest}</head>{body}</html>") == []  # HTML whitespace ok
     for placement in (f"{csp_meta}{head_rest}{body}",                                   # no explicit <head>
                       f"<html><head><noscript>{csp_meta}</noscript>{head_rest}</head>{body}</html>",
                       f"<html><head><template>{csp_meta}</template>{head_rest}</head>{body}</html>",
                       f"<html><head><svg>{csp_meta}</svg>{head_rest}</head>{body}</html>",
                       f"<html><head>{head_rest}{csp_meta}</head>{body}</html>",          # after a <link>
+                      f"<html><head><title>t</title>{csp_meta}{head_rest}</head>{body}</html>",   # after a title
+                      f"<html><head><title/>{csp_meta}{head_rest}</head>{body}</html>",  # self-closed non-void element
+                      f"<html><head><meta name=x>{csp_meta}{head_rest}</head>{body}</html>",     # a non-charset meta
+                      f"<html><head></body>{csp_meta}{head_rest}</head>{body}</html>",   # stray end tag
                       f"<html><head>hello{csp_meta}{head_rest}</head>{body}</html>",      # text before it
+                      f"<html><head> {csp_meta}{head_rest}</head>{body}</html>",    # non-breaking space is text
                       f"<html><head>{head_rest}</head>{body}{csp_meta}</html>"):         # in the body
         out = check_html(placement)
-        assert any("direct child of <head>" in b for b in out), (placement[:60], out)
+        assert any("first element in <head>" in b for b in out), (placement[:60], out)
     bad = check_html(open(sys.argv[2]).read()) if len(sys.argv) > 2 else []
     cases = {
         '<script src="https://cdnjs.cloudflare.com/x.js"></script>': "needs integrity",
