@@ -138,6 +138,7 @@ class Scan(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.bad, self.csp, self.referrer, self.in_script, self.in_style = [], None, 0, False, False
         self.stack, self.head_seq, self.scripts, self.styles, self.gfonts, self.csp_count = [], [], set(), set(), set(), 0
+        self.other_seen = False  # anything before the CSP meta that would start the body in a browser
 
     def fail(self, msg):
         self.bad.append(f"line {self.getpos()[0]}: {msg}")
@@ -149,8 +150,14 @@ class Scan(HTMLParser):
         a = {}
         for k, v in attrs:
             a.setdefault(k.lower(), v or "")  # first occurrence wins, as in the browser
-        if self.stack[-1:] == ["head"] and self.csp is None:
-            self.head_seq.append((tag, a))
+        if self.csp is None:
+            if tag == "head" and self.stack not in ([], ["html"]):
+                self.other_seen = True
+            if not (tag in ("html", "head") or (tag == "meta" and set(a) <= {"charset"})) and not (
+                    tag == "meta" and a.get("http-equiv", "").strip().lower() == "content-security-policy"):
+                self.other_seen = True  # before the CSP only <html>, <head> and <meta charset> may open
+            if self.stack[-1:] == ["head"]:
+                self.head_seq.append((tag, a))
         if tag in BANNED_TAGS:
             self.fail(f"<{tag}> is not allowed")
         if tag == "script" and ({"svg", "math"} & set(self.stack)):
@@ -241,6 +248,8 @@ class Scan(HTMLParser):
             self.fail(f"<{tag}/> self-closing syntax on a non-void element; the browser leaves it open")
 
     def handle_endtag(self, tag):
+        if self.csp is None:
+            self.other_seen = True  # any end tag before the CSP; browsers turn </br> into <br>, which opens the body
         if tag == "script":
             self.in_script = False
         if tag == "style":
@@ -249,6 +258,8 @@ class Scan(HTMLParser):
             del self.stack[len(self.stack) - 1 - self.stack[::-1].index(tag):]
 
     def handle_data(self, data):
+        if self.csp is None and data.strip("\t\n\f\r "):  # HTML whitespace only; &nbsp; is text and starts the body
+            self.other_seen = True
         if self.in_script and (m := BANNED_JS.search(data)):
             self.fail(f"script uses {m.group(0).strip()!r} (network, navigation, storage or obfuscation)")
         if self.in_style:
@@ -347,8 +358,8 @@ def check_html(text):
     seq = [(t, a) for t, a in s.head_seq]
     ok_head = (len(seq) >= 2 and seq[0][0] == "meta" and set(seq[0][1]) == {"charset"} and seq[0][1]["charset"].strip().lower() == "utf-8"
                and seq[1][0] == "meta" and seq[1][1].get("http-equiv", "").strip().lower() == "content-security-policy")
-    if s.csp is not None and not ok_head:
-        bad.append('<head> must start with <meta charset="utf-8"> followed by the Content-Security-Policy meta')
+    if s.csp is not None and (not ok_head or s.other_seen):
+        bad.append('<head> must start with <meta charset="utf-8"> followed by the Content-Security-Policy meta, with nothing else before it')
     elif s.csp is None and not any("Content-Security-Policy" in b for b in bad):
         bad.append('no <meta http-equiv="Content-Security-Policy"> tag inside <head>')
     bad += check_csp(s.csp, s.scripts, s.styles, s.gfonts) if s.csp is not None else []
@@ -460,14 +471,16 @@ def pdf_names_decoded(raw: bytes) -> bytes:
     return re.sub(rb"#([0-9A-Fa-f]{2})", lambda m: bytes([int(m.group(1), 16)]), raw)
 
 
-STREAM_BODY = re.compile(rb"stream\r?\n.*?endstream", re.S)
+# A stream body starts only where the `stream` keyword directly follows the dictionary's closing >>; the word inside a
+# string or comment does not open one, so it cannot be used to hide a later dictionary from the scan.
+STREAM_BODY = re.compile(rb">>[\t\n\f\r ]*stream\r?\n.*?endstream", re.S)
 
 
-def pdf_scan(raw: bytes):
-    """Violations in the plain-text object dictionaries of `raw` (stream bodies removed so binary data cannot match)."""
-    text = pdf_names_decoded(STREAM_BODY.sub(b"stream endstream", raw))
+def pdf_scan(raw: bytes, strip=True):
+    """Violations in `raw`'s object dictionaries. strip=True removes stream bodies so binary data cannot match by chance."""
+    text = pdf_names_decoded(STREAM_BODY.sub(b">> stream endstream", raw) if strip else raw)
     bad = {f"PDF action /{m.group(1).decode()}" for m in PDF_ACTION.finditer(text)}
-    if PDF_URLFS.search(text):
+    if PDF_URLFS.search(pdf_names_decoded(raw)):  # specific enough to scan unstripped, so stripping can never hide it
         bad.add("PDF file specification with /FS /URL (external stream or media)")
     if PDF_OPEN.search(text):
         bad.add("PDF /OpenAction that is not a plain page destination")
@@ -476,14 +489,16 @@ def pdf_scan(raw: bytes):
 
 def check_pdf(p: Path):
     raw = p.read_bytes()
-    bad = pdf_scan(raw)  # the file as written: qpdf drops constructs it does not support (external streams), so scan both
+    bad = pdf_scan(raw)  # the file as written: qpdf drops constructs it does not support (external streams)
     if shutil.which("qpdf"):
         r = subprocess.run(["qpdf", "--qdf", "--object-streams=disable", "--decrypt", str(p), "-"], capture_output=True)
         if r.returncode not in (0, 3):  # 3 = succeeded with warnings
             return [f"qpdf could not expand the PDF (exit {r.returncode}); cannot verify it"]
-        bad |= pdf_scan(r.stdout)  # object streams and encrypted objects expanded
+        bad |= pdf_scan(r.stdout)  # object streams and encrypted objects expanded, streams and strings normalised
     elif b"/ObjStm" in pdf_names_decoded(raw) or b"/Encrypt" in pdf_names_decoded(raw):
         return ["PDF uses object streams or encryption and qpdf is not installed; cannot verify it"]
+    else:
+        bad |= pdf_scan(raw, strip=False)  # no normaliser to lean on: also scan unstripped and accept a rare false positive
     return sorted(bad)
 
 
@@ -658,6 +673,14 @@ def selftest():
         doc(pre="<title>x</title>"): "must start with",
         doc(pre="<link rel=preconnect href=https://unpkg.com>"): "must start with",
         doc(pre='<meta name="x">'): "must start with",
+        doc(pre="hello"): "must start with",
+        doc(pre="&nbsp;"): "must start with",
+        doc(pre="</br>"): "must start with",
+        doc(pre="</head>"): "must start with",
+        doc(csp=f'<noscript><meta http-equiv="Content-Security-Policy" content="{csp_text()}"></noscript>'): "must start with",
+        doc(csp=f'<svg><meta http-equiv="Content-Security-Policy" content="{csp_text()}"></svg>'): "must start with",
+        doc().replace("<html lang=\"en\"><head>", "<html lang=\"en\"><body><head>"): "must start with",
+        doc().replace("<html lang=\"en\"><head>", "<head>").replace("</head>", "</head><html>"): "",  # no <html> wrapper is fine
         doc().replace('<meta name="referrer" content="no-referrer">', ""): "exactly one <meta name=\"referrer\"",
         doc().replace('content="no-referrer"', 'content="origin"'): "no-referrer",
         doc("<script/>fetch(1)</script>"): "self-closing syntax",
@@ -696,6 +719,9 @@ def selftest():
     assert PDF_URLFS.search(b"<< /FS /URL /F (https://x) >>") and PDF_OPEN.search(b"/OpenAction << /S /URI >>")
     assert not PDF_OPEN.search(b"/OpenAction [3 0 R /Fit]") and not PDF_ACTION.search(b"<< /A << /S /URI /URI (https://x) >> >>")
     assert pdf_scan(b"1 0 obj << /Length 3 >>\nstream\n/JS\nendstream\nendobj") == set()  # binary inside a stream body is ignored
+    assert pdf_scan(b"1 0 obj << /T (stream\n) >> endobj 2 0 obj << /S /JavaScript >> endobj 3 0 obj << /L 1 >>\nstream\nx\nendstream")  # the word in a string opens no stream
+    assert pdf_scan(b"1 0 obj << /T (>>stream\n) >> endobj 2 0 obj << /F << /FS /URL /F (x) >> >> endobj 3 0 obj << /L 1 >>\nstream\nx\nendstream")  # URL filespec found even if hidden
+    assert pdf_scan(b"<< /L 1 >>\nstream\n/JS\nendstream", strip=False)  # unstripped mode sees inside streams
     assert pdf_scan(b"1 0 obj << /Type /XObject /F << /FS /URL /F (https://x) >> >>\nstream\n\nendstream") == {"PDF file specification with /FS /URL (external stream or media)"}
     # head block round-trips through the checker
     assert check_html(doc(head_extra=f'<script src="{XLSX}" {sri}></script>', scripts=[XLSX])) == []
