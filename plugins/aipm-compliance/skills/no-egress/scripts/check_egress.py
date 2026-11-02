@@ -114,9 +114,15 @@ class Scan(HTMLParser):
             else:
                 self.fail(f"<{tag} {attr}> points at {h}; images and media must be inline data: URIs")
 
+    def handle_startendtag(self, tag, attrs):
+        # <meta charset/> is fine; a self-closed non-void element (<title/>) is a start tag the browser leaves open.
+        self.handle_starttag(tag, attrs)
+        if tag not in VOID:
+            self.handle_endtag(tag)
+
     def handle_endtag(self, tag):
-        if self.csp is None and tag not in VOID:
-            self.other_seen = True  # any real end tag (including a self-closed non-void element) before the CSP disqualifies it
+        if self.csp is None:
+            self.other_seen = True  # any end tag before the CSP disqualifies it; browsers turn </br> into <br>, which opens the body
         if tag == "script":
             self.in_script = False
         if tag == "style":
@@ -289,6 +295,7 @@ def selftest():
     assert check_html(good) == [], check_html(good)
     assert check_html(f"<head>{csp_meta}{head_rest}</head>{body}") == []  # no <html> wrapper is fine
     assert check_html(f"<html>\n\t<head>\f<meta charset=utf-8>\r\n{csp_meta}{head_rest}</head>{body}</html>") == []  # HTML whitespace ok
+    assert check_html(f'<html><head><meta charset="utf-8"/>{csp_meta}{head_rest}</head>{body}</html>') == []  # XHTML-style void
     for placement in (f"{csp_meta}{head_rest}{body}",                                   # no explicit <head>
                       f"<html><head><noscript>{csp_meta}</noscript>{head_rest}</head>{body}</html>",
                       f"<html><head><template>{csp_meta}</template>{head_rest}</head>{body}</html>",
@@ -298,6 +305,8 @@ def selftest():
                       f"<html><head><title/>{csp_meta}{head_rest}</head>{body}</html>",  # self-closed non-void element
                       f"<html><head><meta name=x>{csp_meta}{head_rest}</head>{body}</html>",     # a non-charset meta
                       f"<html><head></body>{csp_meta}{head_rest}</head>{body}</html>",   # stray end tag
+                      f"<html><head></br>{csp_meta}{head_rest}</head>{body}</html>",     # </br> is a <br> to the browser
+                      f"<html><head></head>{csp_meta}{head_rest}{body}</html>",          # head already closed
                       f"<html><head>hello{csp_meta}{head_rest}</head>{body}</html>",      # text before it
                       f"<html><head> {csp_meta}{head_rest}</head>{body}</html>",    # non-breaking space is text
                       f"<html><head>{head_rest}</head>{body}{csp_meta}</html>"):         # in the body
