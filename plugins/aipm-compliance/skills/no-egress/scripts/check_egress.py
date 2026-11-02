@@ -24,6 +24,11 @@ REQUIRED_CSP = {"default-src": "'none'", "connect-src": "'none'", "form-action":
 CSP_KEYWORDS = {"'none'", "'unsafe-inline'", "data:", "blob:"}
 HYPERLINK_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
 VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+# SVG/MathML leaf elements that may legitimately be written self-closed (plus the fe* filter primitives). Named, not
+# inferred from context, so a desynchronised element stack cannot smuggle a self-closed <script/> through.
+SVG_LEAF = {"circle", "ellipse", "line", "path", "polygon", "polyline", "rect", "use", "stop", "image", "animate",
+            "animatemotion", "animatetransform", "set", "mpath", "view", "mspace", "mglyph", "malignmark", "mprescripts",
+            "none"}
 ASCII_WS = re.compile(r"[\t\n\f\r ]+")  # the browser's CSP tokenizer splits on ASCII whitespace only
 DIRECTIVE = re.compile(r"^[A-Za-z0-9-]+$")
 BANNED_JS = re.compile(
@@ -115,14 +120,13 @@ class Scan(HTMLParser):
                 self.fail(f"<{tag} {attr}> points at {h}; images and media must be inline data: URIs")
 
     def handle_startendtag(self, tag, attrs):
-        # <meta charset/> is fine. Outside inline SVG/MathML, a self-closed non-void element (<script/>, <title/>) is a start
-        # tag the browser leaves open, so what follows would run as script while this parser saw text: reject it.
-        foreign = bool({"svg", "math"} & set(self.stack))
+        # <meta charset/> and leaf SVG/MathML shapes are fine. Any other self-closed element (<script/>, <title/>) is a
+        # start tag the browser leaves open, so what follows would run as script while this parser saw text: reject it.
         self.handle_starttag(tag, attrs)
-        if tag not in VOID and not foreign:
-            self.fail(f"<{tag}/> self-closing syntax on a non-void element; the browser leaves it open")
-        elif foreign and tag not in VOID:
+        if tag in SVG_LEAF or tag.startswith("fe"):
             self.handle_endtag(tag)
+        elif tag not in VOID:
+            self.fail(f"<{tag}/> self-closing syntax on a non-void element; the browser leaves it open")
 
     def handle_endtag(self, tag):
         if self.csp is None:
@@ -330,6 +334,8 @@ def selftest():
         '<div onclick="fetch(1)"></div>': "inline onclick",
         '<script/>fetch(1)</script>': "self-closing syntax",
         '<style/>.x{background:url(https://x.example/a.png)}</style>': "self-closing syntax",
+        '<svg><script/>fetch(1)</script></svg>': "self-closing syntax",
+        '<svg><foreignObject/><title/><desc/></svg>': "self-closing syntax",
     }
     assert not [b for b in check_html(good.replace("<body>", '<body><svg viewBox="0 0 1 1"><circle r="1"/><path d="M0 0"/></svg>')) if "self-closing" in b]
     for html, needle in cases.items():
