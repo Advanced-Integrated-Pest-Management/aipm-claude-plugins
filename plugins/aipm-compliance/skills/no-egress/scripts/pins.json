@@ -1,0 +1,8 @@
+{
+  "note": "Pre-verified tags for sandboxes with no network. Maintained with pin_sri.py --update-pins; never edit a hash by hand.",
+  "verified": "2026-11-03",
+  "pins": {
+    "https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.6.1/chart.umd.min.js": "sha384-Emf5ZVIUiarAdhkgtqK+5/Z5qIvM6QoVrS+qAVtfyZVuD5lIHrac0me485+Antp0",
+    "https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js": "sha384-Pqp51FUN2/qzfxZxBCtF0stpc9ONI6MYZpVqmo8m20SoaQCzf+arZvACkLkirlPz"
+  }
+}

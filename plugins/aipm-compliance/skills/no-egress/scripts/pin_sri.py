@@ -2,6 +2,8 @@
 """Pin a CDN asset: download it, verify it against the provider's own published hash, print the tag to paste.
 
 Usage: pin_sri.py URL [URL...]        (stdlib only; needs network for the download and the publisher check)
+       pin_sri.py --list                 URLs in pins.json, which print their tag offline (no network needed)
+       pin_sri.py --update-pins URL...   maintainers: verify online, then record the tags in pins.json
 
 Accepted URLs (https, version pinned, no query string; validated BEFORE anything is downloaded):
   https://cdnjs.cloudflare.com/ajax/libs/<lib>/<ver>/<file>   checked against api.cdnjs.com's published sha512
@@ -12,6 +14,7 @@ check crosses two operators. Exit 1 and print nothing to paste if any check fail
 After pinning, regenerate the head block: check_egress.py --head <every pinned URL> [--google-fonts]
 """
 import base64, hashlib, json, re, sys
+from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
@@ -20,6 +23,7 @@ SEG = r"[A-Za-z0-9._~+-]+"  # one path segment; must match check_egress.py
 CDNJS = re.compile(rf"^/ajax/libs/({SEG})/({VERSION})/((?:{SEG}/)*{SEG})$")
 NPM = re.compile(rf"^/((?:@{SEG}/)?{SEG})@({VERSION})/((?:{SEG}/)*{SEG})$")
 PLAIN_PATH = re.compile(r"^[A-Za-z0-9._~/@+-]+$")
+PINS_FILE = Path(__file__).with_name("pins.json")  # check_egress.py holds a listed URL to exactly this hash
 
 
 def get(url, binary=False):
@@ -80,20 +84,28 @@ def publisher_check(url):
     return body, mirror == body, "unpkg and jsDelivr serve identical bytes" if mirror == body else "unpkg and jsDelivr differ"
 
 
-def tag(url, body):
-    sri = "sha384-" + b64(hashlib.sha384(body).digest())
+def sri384(body):
+    return "sha384-" + b64(hashlib.sha384(body).digest())
+
+
+def tag(url, sri):
     if urlsplit(url).path.lower().endswith(".css"):
         return f'<link rel="stylesheet" href="{url}" integrity="{sri}" crossorigin="anonymous" referrerpolicy="no-referrer">'
     return f'<script src="{url}" integrity="{sri}" crossorigin="anonymous" referrerpolicy="no-referrer"></script>'
 
 
-def main(urls):
+def main(urls, update=False):
+    doc = json.loads(PINS_FILE.read_text(encoding="utf-8"))
     rc, pinned = 0, []
     for url in urls:
         try:
             parse(url)
         except ValueError as e:
             print(f"FAIL {url}: {e}"); rc = 1; continue
+        if url in doc["pins"] and not update:
+            print(f"OK   {url}: pre-verified on {doc['verified']} (pins.json)")
+            print(tag(url, doc["pins"][url]))
+            pinned.append(url); continue
         try:
             body, ok, note = publisher_check(url)
         except Exception as e:  # network or JSON failure: never guess a hash
@@ -101,8 +113,15 @@ def main(urls):
         if not ok:
             print(f"FAIL {url}: {note}"); rc = 1; continue
         print(f"OK   {url}: {note}, {len(body):,} bytes")
-        print(tag(url, body))
+        print(tag(url, sri384(body)))
         pinned.append(url)
+        doc["pins"][url] = sri384(body)
+    if update and pinned:
+        if rc:
+            print("pins.json not changed: fix the FAIL lines first"); return rc
+        doc["pins"] = dict(sorted(doc["pins"].items()))
+        PINS_FILE.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+        print(f"pins.json updated ({len(pinned)} verified); set \"verified\" to today's date")
     if pinned:
         print("Now regenerate the head block:  check_egress.py --head " + " ".join(pinned) + " [--google-fonts]")
     return rc
@@ -127,8 +146,14 @@ if __name__ == "__main__":
                 parse(bad); raise AssertionError(bad)
             except ValueError:
                 pass
-        assert tag("https://x/a.css", b"").startswith("<link") and tag("https://x/a.js?x.css", b"").startswith("<script")
+        assert tag("https://x/a.css", "").startswith("<link") and tag("https://x/a.js?x.css", "").startswith("<script")
+        for u, h in json.loads(PINS_FILE.read_text(encoding="utf-8"))["pins"].items():
+            parse(u); assert re.fullmatch(r"sha384-[A-Za-z0-9+/]{64}", h), u
         print("selftest ok"); sys.exit(0)
-    if not sys.argv[1:]:
+    if sys.argv[1:] == ["--list"]:
+        print("\n".join(json.loads(PINS_FILE.read_text(encoding="utf-8"))["pins"])); sys.exit(0)
+    if sys.argv[1:2] == ["--update-pins"] and sys.argv[2:]:
+        sys.exit(main(sys.argv[2:], update=True))
+    if not sys.argv[1:] or sys.argv[1].startswith("--"):
         print(__doc__); sys.exit(2)
     sys.exit(main(sys.argv[1:]))
