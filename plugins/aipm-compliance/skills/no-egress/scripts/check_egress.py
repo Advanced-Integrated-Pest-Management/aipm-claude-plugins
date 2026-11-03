@@ -70,7 +70,7 @@ RAW_ELEMS = {"script", "style", "textarea", "title", "xmp", "iframe", "noembed",
 URL_ATTRS = {"href", "src", "srcset", "imagesrcset", "action", "formaction", "data", "poster", "ping", "xlink:href",
              "background", "cite", "longdesc", "manifest", "codebase", "archive", "usemap"}
 CSS_URL = re.compile(r"(?:url|image-set|image)\(\s*['\"]?([^'\")]+)", re.I)
-CSS_IMPORT = re.compile(r"@import\s+(?:url\(\s*(?:\"([^\"\n]*)\"|'([^'\n]*)'|([^\s\"'()]*))\s*\)|\"([^\"\n]*)\"|'([^'\n]*)')", re.I)
+CSS_IMPORT = re.compile(r"@import\s+(?:url\(\s*(?:\"([^\"\n\r\f]*)\"|'([^'\n\r\f]*)'|([^\s\"'()]*))\s*\)|\"([^\"\n\r\f]*)\"|'([^'\n\r\f]*)')", re.I)
 VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
 SVG_LEAF = {"circle", "ellipse", "line", "path", "polygon", "polyline", "rect", "use", "stop", "image", "animate",
             "animatemotion", "animatetransform", "set", "mpath", "view", "g", "text", "tspan", "textpath", "defs",
@@ -356,6 +356,8 @@ class Scan(HTMLParser):
 
     def google_fonts(self, url):
         u = urlsplit(url)
+        if u.fragment or re.search(r"[\s()'\"\\]", url):
+            self.fail("Google Fonts URL may not contain whitespace, brackets, quotes or a fragment")
         if u.path not in ("/css", "/css2"):
             self.fail(f"Google Fonts stylesheet must be /css or /css2, not {u.path}")
         for part in u.query.split("&"):
@@ -373,15 +375,15 @@ class Scan(HTMLParser):
             m = CSS_IMPORT.match(css, at.start())
             url = next((g for g in (m.groups() if m else ()) if g is not None), None)
             kind, host = scheme_host(url) if url is not None else ("bad", None)
-            if self.in_style and kind == "https" and host == GFONTS_CSS:
+            if self.in_style and kind == "https" and host == GFONTS_CSS and not re.search(r"[\s()'\"#]", url):
                 self.google_fonts(url)  # the complete URL, validated like the <link>
                 spans.append(m.span())
             else:
                 self.fail("@import is allowed only for the Google Fonts stylesheet, written @import url(\"https://fonts.googleapis.com/css2?…\")")
                 return
+        for a, b in spans:  # blank each validated @import so nothing inside or straddling it escapes the url() scan
+            css = css[:a] + " " * (b - a) + css[b:]
         for m in CSS_URL.finditer(css):
-            if any(a <= m.start() < b for a, b in spans):
-                continue
             if scheme_host(m.group(1))[0] not in ("data", "frag"):
                 self.fail("CSS may only reference data: URIs (web fonts come through the Google Fonts stylesheet, not page CSS)")
 
@@ -397,24 +399,39 @@ HINTS = {
 # element has no event path, so no listener can rewrite it, and the href is set last, so nothing runs between
 # setting it and the click. Matched as one fixed statement sequence, not by guessing at data flow.
 _ID = r"[A-Za-z_$][\w$]*"
-_ARGS = r"(?:[^;\n{}]|\{[^;\n{}]*\})*"  # one statement's expression: no ';', no newline, braces one level deep
+_CHAIN = rf"{_ID}(?:\s*\.\s*{_ID})*"  # property reads only; getters are refused below
+_LIT = r"(?:\"(?:[^\"\n\r\f\\]|\\[nrt0\"'\\/]|\\u[0-9a-fA-F]{4})*\"|'(?:[^'\n\r\f\\]|\\[nrt0\"'\\/]|\\u[0-9a-fA-F]{4})*')"  # string literal; simple escapes only
+_DATE = r"new\s+Date\s*\(\s*\)(?:\s*\.\s*[A-Za-z]+\s*\(\s*(?:-?\d+(?:\s*,\s*-?\d+)*)?\s*\))*"
+_TPL = rf"`(?:[^`$\\\n\r]|\$(?!\{{)|\$\{{\s*(?:{_CHAIN}|{_DATE})\s*\}})*`"  # ${…} holds a name or a Date chain only
+_VAL = rf"(?:{_LIT}|{_TPL})"
+_PART = rf"(?:{_LIT}|{_CHAIN}(?:\s*\.\s*join\s*\(\s*{_LIT}?\s*\))?)"
+_PARTS = rf"{_PART}(?:\s*\+\s*{_PART})*"
+_BLOB = (rf"(?:new\s+Blob\s*\(\s*\[\s*{_PARTS}(?:\s*,\s*{_PARTS})*\s*\]\s*(?:,\s*\{{\s*type\s*:\s*{_LIT}\s*,?\s*\}}\s*)?\)"
+         rf"|{_ID}(?![\w$.(]))")
+_OBJURL = rf"URL\s*\.\s*createObjectURL\s*\(\s*{_BLOB}\s*\)"
+_DATAURL = rf"(?P<D>['\"])data:[^'\"`\n\r\f$\\]*(?P=D)(?:\s*\+\s*encodeURIComponent\s*\(\s*{_CHAIN}\s*\))?"
 _END = r"[ \t]*(?:;[ \t]*\n?|\n)\s*"
-_LIT = r"(?:\"[^\"\n\\]*\"|'[^'\n\\]*')"  # plain string literal, no escapes
 _A = r"(?P=A)(?![\w$])"
+# The one allowed scripted click: a download from a link that is never attached to the page (no event path, so no
+# listener can rewrite it). Every step is a fixed statement whose values are literals or the small grammar above, so
+# no user code can run between creating the link and clicking it. Matched as one statement sequence.
 DOWNLOAD_TEMPLATE = re.compile(
-    rf"(?:const\s+(?P<U>{_ID})\s*=\s*URL\s*\.\s*createObjectURL\s*\({_ARGS}\){_END})?"
+    rf"(?:const\s+(?P<U>{_ID})\s*=\s*{_OBJURL}{_END})?"
     rf"const\s+(?P<A>{_ID})\s*=\s*document\s*\.\s*createElement\s*\(\s*(?P<Q>['\"`])a(?P=Q)\s*\){_END}"
-    rf"(?:(?:{_A}\s*\.\s*(?:download|style\s*\.\s*\w+|rel)\s*=\s*{_ARGS}"
-    rf"|{_A}\s*\.\s*setAttribute\s*\(\s*['\"`]download['\"`]\s*,{_ARGS}\)"
-    rf"|const\s+(?P<V>{_ID})\s*=\s*URL\s*\.\s*createObjectURL\s*\({_ARGS}\)){_END})*"
-    rf"{_A}\s*\.\s*href\s*=\s*(?:URL\s*\.\s*createObjectURL\s*\({_ARGS}\)|(?:(?P=U)|(?P=V))(?![\w$])|(?P<D>['\"])data:[^'\"`\n$\\]*(?P=D)(?:\s*\+\s*encodeURIComponent\s*\(\s*{_ID}\s*\))?){_END}"
-    rf"(?:{_A}\s*\.\s*download\s*=\s*{_LIT}{_END})?"
+    rf"(?:(?:{_A}\s*\.\s*download\s*=\s*{_VAL}"
+    rf"|{_A}\s*\.\s*(?:style\s*\.\s*[A-Za-z]+|rel)\s*=\s*{_LIT}"
+    rf"|{_A}\s*\.\s*setAttribute\s*\(\s*['\"]download['\"]\s*,\s*{_VAL}\s*\)"
+    rf"|const\s+(?P<V>{_ID})\s*=\s*{_OBJURL}){_END})*"
+    rf"{_A}\s*\.\s*href\s*=\s*(?:{_OBJURL}|(?:(?P=U)|(?P=V))(?![\w$])|{_DATAURL}){_END}"
+    rf"(?:{_A}\s*\.\s*download\s*=\s*{_VAL}{_END})?"
     rf"{_A}\s*\.\s*click\s*\(\s*\)")
-# A download template is only trustworthy if nothing rebinds or wraps what it calls.
+# Constructs anywhere in the script that could run code inside the template (getters, conversions, rebound globals).
 DOWNLOAD_POISON = re.compile(
-    r"createObjectURL\s*=(?!=)|createElement\s*=(?!=)|\.\s*URL\s*=(?!=)|(?<![\w$.])URL\s*=(?!=)|"
-    r"\b(?:const|let|var|function|class)\s+(?:URL|document)\b|[(,]\s*(?:URL|document)\s*[,)=]|\b(?:URL|document)\s*=>|"
-    r"defineProperty|defineProperties|getPrototypeOf|setPrototypeOf|__proto__|__define|__lookup|getOwnPropertyDescriptor|\bProxy\b")
+    r"createObjectURL\s*=(?!=)|createElement\s*=(?!=)|\.\s*URL\s*=(?!=)|(?<![\w$.])(?:URL|Date|Blob|encodeURIComponent)\s*=(?!=)|"
+    r"\b(?:const|let|var|function|class)\s+(?:URL|document|Date|Blob|encodeURIComponent)\b|"
+    r"[(,]\s*(?:URL|document|Date|Blob)\s*[,)=]|\b(?:URL|document|Date|Blob)\s*=>|"
+    r"defineProperty|defineProperties|getPrototypeOf|setPrototypeOf|__proto__|__define|__lookup|getOwnPropertyDescriptor|\bProxy\b|"
+    r"\b(?:get|set)\s+[\w$]+\s*\([^)]*\)\s*\{|\b(?:toString|valueOf|join|toJSON)\s*(?:\([^)]*\)\s*\{|:|=(?![=>]))|toPrimitive|Symbol")
 
 
 def download_clicks(data):
@@ -785,6 +802,8 @@ def selftest():
         doc(f'<button id=b>Export</button>{dl}'),  # the standard CSV export
         doc('<script>const csv="a,b";const link=document.createElement("a");link.setAttribute("download","r.csv");'
             'link.href="data:text/csv;charset=utf-8,"+encodeURIComponent(csv);link.click()</script>'),
+        doc('<script>const csv="a,b";const url=URL.createObjectURL(new Blob(["\\ufeff" + csv], {type: "text/csv;charset=utf-8;"}));\n'
+            'const a=document.createElement("a");a.download="r.csv";a.href=url;a.click()</script>'),
         doc('<script>function x(rows){\n const a = document.createElement(\'a\');\n a.href = URL.createObjectURL(new Blob([rows.join("\\n")], {type: "text/csv"}));\n'
             ' a.download = "r.csv";\n a.click();\n}\nrows.sort((a, b) => a.n - b.n)</script>'),
         doc('<script>const rows=[{worker:"J. Doe",location:{name:"North Barn"}}];// nothing is fetched; Worker column shown'
@@ -925,6 +944,12 @@ def selftest():
         doc(f'<script>URL.createObjectURL=()=>"{EVIL}";const a=document.createElement("a");a.download="x";a.href=URL.createObjectURL(b);a.click()</script>'): ".click",
         doc(f'<script>function go(URL){{const a=document.createElement("a");a.download="x";a.href=URL.createObjectURL(b);a.click()}}go({{createObjectURL:()=>"{EVIL}"}})</script>'): ".click",
         doc(f'<script>const a=document.createElement("a");a.download="x";a.href=URL.createObjectURL(b), a.href="{EVIL}";a.click()</script>'): ".click",
+        doc('<script>const a=document.createElement("a");a.download=(document.body.appendChild(a),"x");a.href=URL.createObjectURL(b);a.click()</script>'): ".click",
+        doc(f'<script>const a=document.createElement("a");a.download="x";a.style.color=(a.addEventListener("click",()=>{{}}),"red");a.href=URL.createObjectURL(b);a.click()</script>'): ".click",
+        doc('<script>const a=document.createElement("a");a.download="x";a.href=URL.createObjectURL(b && (document.body.appendChild(a), b));a.click()</script>'): ".click",
+        doc('<script>const a=document.createElement("a");a.download=`${f()}.csv`;a.href=URL.createObjectURL(b);a.click()</script>'): ".click",
+        doc('<script>const o={get n(){document.body.appendChild(a);return "x"}};const a=document.createElement("a");a.download=`${o.n}`;a.href=URL.createObjectURL(b);a.click()</script>'): ".click",
+        doc('<script>const r={toString(){document.body.appendChild(a);return ""}};const a=document.createElement("a");a.download="x";a.href=URL.createObjectURL(new Blob([r]));a.click()</script>'): ".click",
         doc(f'<script>Object.defineProperty(HTMLAnchorElement.prototype,"href",{{set(){{}}}});const a=document.createElement("a");a.download="x";a.href=URL.createObjectURL(b);a.click()</script>'): ".click",
         doc('<script>let a=document.createElement("a");a.download="x";a.href=URL.createObjectURL(b);a=document.links[0];a.click()</script>'): ".click",
         doc(f'<a id=x href="{EVIL}" rel="noopener noreferrer">x</a><script>const a=document.getElementById("x");a.download="y";a.click()</script>'): ".click",
@@ -936,6 +961,8 @@ def selftest():
         doc("<style>@import 'https://fonts.googleapis.com/css2?family=Roboto;&text=secret';</style>", gfonts=[f"https://{GFONTS_CSS}/css2"]): "Google Fonts query",
         doc('<style>@import /**/ url("https://fonts.googleapis.com/css2?family=Roboto");</style>', gfonts=[f"https://{GFONTS_CSS}/css2"]): "@import is allowed only",
         doc(f'<style>@import url("{EVIL}/x.css");</style>'): "@import is allowed only",
+        doc('<style>@import "https://fonts.googleapis.com/css2?family=Roboto\r url(https://evil.example/x)";</style>', gfonts=[f"https://{GFONTS_CSS}/css2"]): "@import is allowed only",
+        doc('<style>@import url("https://fonts.googleapis.com/css2?family=Roboto#x");</style>', gfonts=[f"https://{GFONTS_CSS}/css2"]): "@import is allowed only",
         doc("<script>fetch ('x'); new Worker('w.js'); import('x')</script>"): "Worker",
         doc("<a href=\"java&#9;script:localStorage.setItem('rj','v')\">x</a>"): "javascript: URL",
         doc('<svg><a href="#x"><rect width="1" height="1"/><set attributeName="href" to="javascript:1"/></a></svg>'): "attributeName=href",
