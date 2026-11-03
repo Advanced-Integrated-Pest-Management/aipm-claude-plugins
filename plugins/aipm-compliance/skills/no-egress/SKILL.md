@@ -25,7 +25,7 @@ Two layers do the work, and they are not the same:
    ```bash
    python3 <this skill's folder>/scripts/check_egress.py --head <every pinned URL> --google-fonts
    ```
-   Paste the three lines it prints as the first three elements of `<head>`, before `<title>`. Regenerate whenever the set of pinned URLs changes; the checker compares the CSP against the tags.
+   The file must begin `<!DOCTYPE html><html lang="en"><head>` followed by those three lines verbatim; nothing else, not even a comment, may come before the CSP meta. `<title>` and the rest of `<head>` follow. Regenerate whenever the set of pinned URLs changes; the checker compares the CSP against the tags and refuses any other head shape.
 3. Write the page under the rules below.
 4. Run the checker (last section).
 
@@ -33,7 +33,7 @@ A generated head block looks like this (one pinned script, Google Fonts on):
 
 ```html
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js; style-src 'unsafe-inline' https://fonts.googleapis.com/css2; font-src data: https://fonts.gstatic.com; img-src data: blob:; media-src data: blob:; connect-src 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js; style-src 'unsafe-inline' https://fonts.googleapis.com/css2; font-src data: https://fonts.gstatic.com/s/; img-src data: blob:; media-src data: blob:; connect-src 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'">
 <meta name="referrer" content="no-referrer">
 ```
 
@@ -44,22 +44,25 @@ A generated head block looks like this (one pinned script, Google Fonts on):
 | cdnjs | `https://cdnjs.cloudflare.com/ajax/libs/<lib>/<version>/<file>` | provider's published sha512 |
 | jsDelivr, npm only | `https://cdn.jsdelivr.net/npm/<pkg>@<version>/<file>` | provider's published sha256 |
 | unpkg | `https://unpkg.com/<pkg>@<version>/<file>` | byte-identical to jsDelivr's copy |
-| Google Fonts | `<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=…">` | none possible (CSS varies by browser); origin-locked by the CSP |
+| Google Fonts | `<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=…&display=swap">` | none possible (CSS varies by browser); the CSP allows only Google's `/s/` font-file path, and the query may carry only `family=` and `display=` |
 
 The version is pinned in the URL: never `@latest`, never a GitHub mirror, never a query string. Every CDN tag carries `integrity="sha384-…"` and `crossorigin="anonymous"`. The CSP names each pinned file by full URL, so even script that tries to load something else from those hosts is refused by the browser.
 
 ### Inside the page
 
-- **No network calls.** No `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `sendBeacon`, service workers, workers, `RTCPeerConnection`, dynamic `import()`, `type="module"` scripts, or anything on `navigator`.
-- **No navigation.** No `location` assignments or reads, `window.open`, `.click()`, `.submit()`, `dispatchEvent`, `document.write`, and no `<meta http-equiv="refresh">`. Do not name a variable `location`.
+- **No network calls.** No `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `sendBeacon`, service workers, workers, `RTCPeerConnection`, `import`, `type="module"` scripts, the Artifact runtime (`window.claude.*`), or anything on `navigator` beyond `language`, `userAgent`, `platform` and `onLine`.
+- **No navigation.** No `location` reads or writes on anything (`x.location = …` is refused even on a data object; call the field `site`), no `open`, `window.open`, `.click` in any form, `.submit()`, `dispatchEvent`, `document.write`, `navigation.*`, `defaultView`, and no `<meta http-equiv="refresh">`, static or inserted. Do not name a variable `location` or a function `open`.
 - **No browser storage.** No `localStorage`, `sessionStorage`, `indexedDB`, `document.cookie`, Cache API. State lives in memory for the page's lifetime. (Every `file://` page shares one storage origin in Chrome, so stored data would be readable by any other local file.)
-- **No disguised names.** No `eval`, `Function(…)`, `with`, `Reflect`, `fromCharCode`, bracket access on `window`/`self`/`document`/`globalThis`, or splicing string literals (`'fe'+'tch'`). Write `"Total: " + n`, not `"Total: " + " units"`.
-- **Data leaves only by the reader's own click.** Offer a visible `<a download="report.csv">` whose `href` you set to `URL.createObjectURL(blob)`; the reader clicks it. The browser's own print and save also work. Never click or submit anything from script.
-- **Images, logos and media are inline** `data:` URIs (the AIPM logo lives at `~/.claude/assets/AIPM_Logo_Transparent.png`; base64 it). No remote `<img>`, `srcset`, `poster`, `background`, CSS `url()` or `image-set()`. Inline `<svg>` is fine; `<script>` inside it is not.
-- **Not allowed at all:** `<iframe>`, `<frame>`, `<object>`, `<embed>`, `<base>`, `<form>`, `<noscript>`, `<template>`, `<math>`, `<foreignObject>`, `javascript:` URLs, processing instructions, CDATA sections, comments containing `--`, self-closing syntax on non-void elements (`<title/>`, `<script/>`), duplicate attributes on an element, any `charset` other than `utf-8`, any `http-equiv` other than the CSP.
+- **No disguised names.** No `eval`, `Function(…)`, `with`, `Reflect`, `prototype`, `String.raw`, `fromCharCode`, bracket access on `window`/`self`/`document`/`globalThis`/`this`, splicing string literals (`'fe'+'tch'`) or interpolating them (`${'tch'}`). Write `"Total: " + n`, not `"Total: " + " units"`.
+- **No element creation that the CSP cannot police.** No `createElement` of `script`, `link`, `meta`, `base`, `iframe`, `form`, `object` or `embed`; no `.src = …` assignments; no `setAttribute` of `src`, `href`, `srcset`, `action`, `formaction`, `ping`, `poster`, `data` or `content`. Put images in the markup as `data:` URIs rather than setting them from script.
+- **Data leaves only by the reader's own click.** Offer a visible `<a download="report.csv">` whose `href` property you set (`a.href = URL.createObjectURL(blob)`, or a static `data:` URL in the markup); the reader clicks it. The browser's own print and save also work. Never click or submit anything from script, and never create the link and click it programmatically.
+- **Images, logos and media are inline** `data:` URIs (the AIPM logo lives at `~/.claude/assets/AIPM_Logo_Transparent.png`; base64 it). No remote `<img>`, `srcset`, `poster`, `background`, CSS `url()` or `image-set()`. Page CSS may reference only `data:` URIs; a backslash anywhere in CSS is refused.
+- **Inline `<svg>`** is fine for charts. Inside it, `<style>` and `<title>` may hold plain text only (no `<` or `&`); `<script>`, `<textarea>` and the other raw-text elements are refused there, as are SMIL animations of `href`. Only known SVG leaf elements may use `<x/>` self-closing syntax.
+- **Not allowed at all:** `<iframe>`, `<frame>`, `<object>`, `<embed>`, `<base>`, `<form>`, `<noscript>`, `<template>`, `<math>`, `<foreignObject>`, `<link>` rels other than `stylesheet`/`preconnect`/`dns-prefetch`/`icon`, `javascript:` URLs, processing instructions, CDATA sections, abrupt comments (`<!-->`), comments closed with `-- >` or `--!>`, `<!--` or `<script` inside script text, `</script x>`-style end tags, `</ ` with a space, self-closing syntax on non-void elements (`<title/>`, `<script/>`), duplicate attributes on an element, a second `charset` declaration, any `charset` other than `utf-8`, any `http-equiv` other than the CSP (including `content-type`), a doctype other than `<!DOCTYPE html>`, backslashes or `@` in URLs, and non-ASCII space characters (U+00A0 and friends) anywhere in the markup: write `&nbsp;`.
 - **Self-contained:** no relative file references (`src="lib.js"`). The file is forwarded on its own.
 - **Outbound links** `<a href="https://…">` are fine (a click is the reader's choice) but must carry `rel="noopener noreferrer"`; no `ping`.
-- **Fonts:** Google Fonts via the `<link>` above with a system fallback in the stack, or a system stack alone. Never a font from any other host.
+- **Fonts:** Google Fonts via the `<link>` above with a system fallback in the stack, or a system stack alone. Never `@font-face` to any host, Google's included; the only web-font path is Google's own stylesheet.
+- **File name:** `.html` or `.htm`. `.shtml`, `.xhtml`, `.svg`, `.mhtml` and `.hta` cannot carry this policy and are refused by extension; the checker fails closed on any extension it does not know.
 
 ## DOCX, PPTX, XLSX
 
@@ -80,4 +83,4 @@ The version is pinned in the URL: never `@latest`, never a GitHub mirror, never 
 python3 <this skill's folder>/scripts/check_egress.py <output files...>
 ```
 
-Each `EGRESS:` line names the file, line and rule. Fix the generator and regenerate; do not hand-edit the output. The checker refuses constructs that different HTML parsers read differently, so a file it passes means the same thing to the browser as it did to the check. If it says a PDF "cannot be verified", the PDF uses object streams or encryption: install `qpdf` (`brew install qpdf`) and rerun, or regenerate without them. In Claude Code the aipm-compliance guard runs the same check when the file is written (HTML), sent or published, and blocks it if the check fails or cannot run.
+Each `EGRESS:` line names the file, line and rule. Fix the generator and regenerate; do not hand-edit the output. The checker refuses constructs that different HTML parsers read differently, so a file it passes means the same thing to the browser as it did to the check. If it says a PDF "cannot be verified", the PDF uses object streams or encryption: install `qpdf` (`brew install qpdf`) and rerun, or regenerate without them. In Claude Code the aipm-compliance guard runs the same check when the file is written (any egress-relevant extension), sent or published, and blocks it if the check fails or cannot run.

@@ -5,8 +5,9 @@ import type { Register } from 'claude-code'
 const LEGEND = /CONFIDENTIAL\s*[–—-]\s*FOR INTERNAL USE ONLY|AIPM-CONFIDENTIAL-INTERNAL|aipm-audience:\s*external/i
 const HTML = /\.html?$/i
 const DELIVERABLE = /\.(html?|docx|pptx|xlsx|pdf)$/i
-// Everything check_egress.py has a verdict for, including the formats it refuses outright (svg, mhtml, macro-enabled, xlsb).
-const EGRESS_FILES = /\.(html?|svg|xhtml?|xht|mhtml?|docx|dotx|docm|dotm|xlsx|xltx|xlsm|xltm|xlam|xlsb|pptx|potx|ppsx|pptm|potm|ppsm|ppam|pdf)$/i
+// Everything check_egress.py has a verdict for, including the formats it refuses outright (svg, server-side includes, mhtml,
+// HTA, macro-enabled, xlsb). check_egress.py itself fails closed on any extension it does not know.
+const EGRESS_FILES = /\.(s?x?html?|xht|xhtm|shtm|mhtml?|svgz?|hta|htc|docx|dotx|docm|dotm|xlsx|xltx|xlsm|xltm|xlam|xlsb|pptx|potx|ppsx|pptm|potm|ppsm|ppam|pdf)$/i
 // App development account: the no-egress check is skipped (the legend check still runs). Not mentioned in the distributed skill.
 const EXEMPT_ACCOUNT = 'wscott@advancedipm.com'
 const TIMEOUT_MS = 120_000 // a 20 MB page or a qpdf expansion can take seconds; the default 30 s would fail the guard
@@ -57,9 +58,11 @@ async function gate($: any, paths: string[], e: any, next: any) {
 
 export const register: Register = on => {
   // HTML isn't on disk yet at Write time; check the content itself (over stdin, so size is not an argv problem).
+  // Other egress-relevant extensions written as text (.svg, .shtml, .xhtml, …) are refused by the checker by extension.
   on('tool.call', { tool: 'Write' }, async ($, e, next) => {
-    if (!HTML.test(e.file_path)) return next(e)
-    if (!LEGEND.test(e.content)) return { deny: legendWhy([e.file_path]) }
+    const html = HTML.test(e.file_path)
+    if (!html && !EGRESS_FILES.test(e.file_path)) return next(e)
+    if (html && !LEGEND.test(e.content)) return { deny: legendWhy([e.file_path]) }
     try {
       const bad = await egress($, [e.file_path], e.content)
       return bad ? { deny: egressWhy(bad) } : next(e)

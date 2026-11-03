@@ -16,8 +16,9 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 VERSION = r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.]+)?"
-CDNJS = re.compile(rf"^/ajax/libs/([^/@]+)/({VERSION})/([^?#]+)$")
-NPM = re.compile(rf"^/((?:@[^/@]+/)?[^/@]+)@({VERSION})/([^?#]+)$")
+SEG = r"[A-Za-z0-9._~+-]+"  # one path segment; must match check_egress.py
+CDNJS = re.compile(rf"^/ajax/libs/({SEG})/({VERSION})/((?:{SEG}/)*{SEG})$")
+NPM = re.compile(rf"^/((?:@{SEG}/)?{SEG})@({VERSION})/((?:{SEG}/)*{SEG})$")
 PLAIN_PATH = re.compile(r"^[A-Za-z0-9._~/@+-]+$")
 
 
@@ -53,7 +54,10 @@ def parse(url):
             raise ValueError("unpkg URL must be /<pkg>@<version>/<file>")
     else:
         raise ValueError(f"{host or url} is not an allowed provider (cdnjs, jsDelivr npm, unpkg)")
-    return host, m.group(1), m.group(2), m.group(3)
+    file = m.group(3)
+    if any(x in (".", "..") for x in file.split("/")) or "." not in file.rsplit("/", 1)[-1].strip("."):
+        raise ValueError("a pinned URL must end in a file name (a trailing slash or '..' would make the CSP source a prefix)")
+    return host, m.group(1), m.group(2), file
 
 
 def publisher_check(url):
@@ -106,6 +110,13 @@ if __name__ == "__main__":
         assert parse("https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js")[1:] == ("xlsx", "0.18.5", "xlsx.full.min.js")
         assert parse("https://cdn.jsdelivr.net/npm/@scope/pkg@1.2.3/dist/a.js")[1:] == ("@scope/pkg", "1.2.3", "dist/a.js")
         assert parse("https://unpkg.com/chart.js@4.4.1/dist/chart.umd.js")[1:] == ("chart.js", "4.4.1", "dist/chart.umd.js")
+        for u in ("https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/", "https://cdn.jsdelivr.net/npm/a@1.0.0/../../x.js",
+                  "https://unpkg.com/a@1.0.0/x", "https://cdnjs.cloudflare.com/ajax/libs/x/1.0.0/a.js?v=1"):
+            try:
+                parse(u)
+                raise AssertionError(u)
+            except ValueError:
+                pass
         for bad in ("https://cdn.jsdelivr.net/npm/xlsx@latest/x.js", "https://cdnjs.cloudflare.com/ajax/libs/xlsx/latest/x.js",
                     "https://cdn.jsdelivr.net/gh/foo/bar@1.0.0/x.js", "http://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/x.js",
                     "https://unpkg.com/lodash@4.17.21/lodash.js?v=1", "https://evil.example/x.js", "file:///etc/passwd"):
