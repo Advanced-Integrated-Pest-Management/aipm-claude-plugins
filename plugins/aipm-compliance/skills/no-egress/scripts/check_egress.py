@@ -35,6 +35,8 @@ PINNED_PATH = {
 }
 PLAIN_PATH = re.compile(r"^[A-Za-z0-9._~/@+-]+$")  # CSP compares paths literally; keep pinned URLs free of escapes
 SRI = re.compile(r"^sha(256|384|512)-[A-Za-z0-9+/]+={0,2}$")
+# Pre-verified tags (pin_sri.py --update-pins). A listed URL must carry exactly this hash; a missing file fails the import, so the guard denies.
+PINS = json.loads((Path(__file__).with_name("pins.json")).read_text(encoding="utf-8"))["pins"]
 FIXED_CSP = {  # every directive except script-src/style-src is verbatim; those two are computed from the pinned tags
     "default-src": ["'none'"], "font-src": ["data:", f"https://{GFONTS_FILES}/s/"], "img-src": ["data:", "blob:"],  # font-src path prefix: Google's font files only
     "media-src": ["data:", "blob:"], "connect-src": ["'none'"], "form-action": ["'none'"], "frame-src": ["'none'"],
@@ -296,6 +298,8 @@ class Scan(HTMLParser):
                 return
             if not SRI.match(a.get("integrity", "")) or a.get("crossorigin", "").strip().lower() not in ("", "anonymous") or "crossorigin" not in a:
                 self.fail(f'<{tag}> {url} needs integrity="sha384-…" and crossorigin="anonymous"')
+            elif src in PINS and a.get("integrity", "").strip() != PINS[src]:
+                self.fail(f"<{tag}> {url} integrity does not match the pre-verified pin; paste the tag pin_sri.py prints")
             (self.scripts if tag == "script" else self.styles).add(src)
         elif tag == "link" and {"preconnect", "dns-prefetch"} & rel:
             if host not in CDN_HOSTS | {GFONTS_CSS, GFONTS_FILES}:
@@ -1032,6 +1036,11 @@ def selftest():
     # head block round-trips through the checker
     assert check_html(doc(head_extra=f'<script src="{XLSX}" {sri}></script>', scripts=[XLSX])) == []
     assert "script-src 'unsafe-inline' " + XLSX in head_block([XLSX])
+    # pre-verified pins: every entry is a valid pinned URL with a sha384; a listed URL must carry exactly that hash
+    assert PINS and all(pinned_source(u) == (u, None) and h.startswith("sha384-") and SRI.match(h) for u, h in PINS.items())
+    pin = next(iter(PINS))
+    assert check_html(doc(head_extra=f'<script src="{pin}" integrity="{PINS[pin]}" crossorigin="anonymous"></script>', scripts=[pin])) == []
+    assert "pre-verified pin" in "\n".join(check_html(doc(head_extra=f'<script src="{pin}" {sri}></script>', scripts=[pin])))
     print("selftest ok")
 
 

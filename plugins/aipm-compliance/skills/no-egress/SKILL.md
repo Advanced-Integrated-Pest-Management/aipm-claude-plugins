@@ -20,7 +20,9 @@ Two layers do the work, and they are not the same:
    ```bash
    python3 <this skill's folder>/scripts/pin_sri.py https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
    ```
-   It validates the URL, downloads the file, checks it against the hash the provider itself publishes, and prints the finished `<script>` or `<link>` tag. Paste that tag; never type a hash from memory. `FAIL` means pick another provider or version. Prefer cdnjs. On jsDelivr, pin the file the package actually ships: a `.min.js` it does not ship is minified on the fly and has no published hash (Chart.js 4 ships `dist/chart.umd.js`).
+   It validates the URL, downloads the file, checks it against the hash the provider itself publishes, and prints the finished `<script>` or `<link>` tag. Paste that tag; never type a hash from memory. `FAIL` means pick another provider or version.
+
+   URLs in `scripts/pins.json` were verified ahead of time, so `pin_sri.py` prints their tags with no network (for sandboxes that have none), and the checker refuses any other hash on them. `pin_sri.py --list` shows them; today that is Chart.js 4.6.1 (`https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.6.1/chart.umd.min.js`) and ExcelJS 4.4.0 (`https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js`). Use those exact URLs when you need either library. If the network is down and the library you want is not listed, build without it (inline SVG for charts) and say so. Prefer cdnjs. On jsDelivr, pin the file the package actually ships: a `.min.js` it does not ship is minified on the fly and has no published hash (Chart.js 4 ships `dist/chart.umd.js`).
 2. **Generate the head block** for exactly those URLs (add `--google-fonts` if the page uses Google Fonts):
    ```bash
    python3 <this skill's folder>/scripts/check_egress.py --head <every pinned URL> --google-fonts
