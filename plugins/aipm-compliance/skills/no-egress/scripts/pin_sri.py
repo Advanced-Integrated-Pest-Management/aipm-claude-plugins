@@ -72,6 +72,9 @@ def publisher_check(url):
         files = get(f"https://data.jsdelivr.com/v1/package/npm/{name}@{ver}/flat").get("files", [])
         pub = next((f["hash"] for f in files if f["name"] == "/" + file), None)
         ours = b64(hashlib.sha256(body).digest())
+        if not pub and re.search(r"\.min\.(js|css)$", file):
+            return body, False, ("jsDelivr has no hash for that file: the package does not ship it, so jsDelivr minifies it on the fly. "
+                                 "Pin the file the package ships (drop .min), or use cdnjs")
         return body, pub == ours, f"jsDelivr publishes sha256 {pub}" if pub else "jsDelivr has no hash for that file"
     mirror = get(f"https://cdn.jsdelivr.net/npm/{name}@{ver}/{file}", binary=True)
     return body, mirror == body, "unpkg and jsDelivr serve identical bytes" if mirror == body else "unpkg and jsDelivr differ"
