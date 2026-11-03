@@ -399,17 +399,16 @@ HINTS = {
 # element has no event path, so no listener can rewrite it, and the href is set last, so nothing runs between
 # setting it and the click. Matched as one fixed statement sequence, not by guessing at data flow.
 _ID = r"[A-Za-z_$][\w$]*"
-_CHAIN = rf"{_ID}(?:\s*\.\s*{_ID})*"  # property reads only; getters are refused below
+_NAME = rf"{_ID}(?![\w$.(\[])"  # a plain variable name: no property chain (getters), no call, no index
 _LIT = r"(?:\"(?:[^\"\n\r\f\\]|\\[nrt0\"'\\/]|\\u[0-9a-fA-F]{4})*\"|'(?:[^'\n\r\f\\]|\\[nrt0\"'\\/]|\\u[0-9a-fA-F]{4})*')"  # string literal; simple escapes only
-_DATE = r"new\s+Date\s*\(\s*\)(?:\s*\.\s*[A-Za-z]+\s*\(\s*(?:-?\d+(?:\s*,\s*-?\d+)*)?\s*\))*"
-_TPL = rf"`(?:[^`$\\\n\r]|\$(?!\{{)|\$\{{\s*(?:{_CHAIN}|{_DATE})\s*\}})*`"  # ${…} holds a name or a Date chain only
+_TPL = rf"`(?:[^`$\\\n\r]|\$(?!\{{)|\$\{{\s*{_NAME}\s*\}})*`"  # ${…} holds a plain name only; compute it before the link
 _VAL = rf"(?:{_LIT}|{_TPL})"
-_PART = rf"(?:{_LIT}|{_CHAIN}(?:\s*\.\s*join\s*\(\s*{_LIT}?\s*\))?)"
+_PART = rf"(?:{_LIT}|{_ID}\s*\.\s*join\s*\(\s*{_LIT}?\s*\)|{_NAME})"
 _PARTS = rf"{_PART}(?:\s*\+\s*{_PART})*"
 _BLOB = (rf"(?:new\s+Blob\s*\(\s*\[\s*{_PARTS}(?:\s*,\s*{_PARTS})*\s*\]\s*(?:,\s*\{{\s*type\s*:\s*{_LIT}\s*,?\s*\}}\s*)?\)"
          rf"|{_ID}(?![\w$.(]))")
 _OBJURL = rf"URL\s*\.\s*createObjectURL\s*\(\s*{_BLOB}\s*\)"
-_DATAURL = rf"(?P<D>['\"])data:[^'\"`\n\r\f$\\]*(?P=D)(?:\s*\+\s*encodeURIComponent\s*\(\s*{_CHAIN}\s*\))?"
+_DATAURL = rf"(?P<D>['\"])data:[^'\"`\n\r\f$\\]*(?P=D)(?:\s*\+\s*encodeURIComponent\s*\(\s*{_NAME}\s*\))?"
 _END = r"[ \t]*(?:;[ \t]*\n?|\n)\s*"
 _A = r"(?P=A)(?![\w$])"
 # The one allowed scripted click: a download from a link that is never attached to the page (no event path, so no
@@ -423,7 +422,7 @@ DOWNLOAD_TEMPLATE = re.compile(
     rf"|{_A}\s*\.\s*setAttribute\s*\(\s*['\"]download['\"]\s*,\s*{_VAL}\s*\)"
     rf"|const\s+(?P<V>{_ID})\s*=\s*{_OBJURL}){_END})*"
     rf"{_A}\s*\.\s*href\s*=\s*(?:{_OBJURL}|(?:(?P=U)|(?P=V))(?![\w$])|{_DATAURL}){_END}"
-    rf"(?:{_A}\s*\.\s*download\s*=\s*{_VAL}{_END})?"
+    rf"(?:{_A}\s*\.\s*download\s*=\s*{_LIT}{_END})?"  # after href: a string literal only
     rf"{_A}\s*\.\s*click\s*\(\s*\)")
 # Constructs anywhere in the script that could run code inside the template (getters, conversions, rebound globals).
 DOWNLOAD_POISON = re.compile(
@@ -431,7 +430,8 @@ DOWNLOAD_POISON = re.compile(
     r"\b(?:const|let|var|function|class)\s+(?:URL|document|Date|Blob|encodeURIComponent)\b|"
     r"[(,]\s*(?:URL|document|Date|Blob)\s*[,)=]|\b(?:URL|document|Date|Blob)\s*=>|"
     r"defineProperty|defineProperties|getPrototypeOf|setPrototypeOf|__proto__|__define|__lookup|getOwnPropertyDescriptor|\bProxy\b|"
-    r"\b(?:get|set)\s+[\w$]+\s*\([^)]*\)\s*\{|\b(?:toString|valueOf|join|toJSON)\s*(?:\([^)]*\)\s*\{|:|=(?![=>]))|toPrimitive|Symbol")
+    r"\b(?:get|set)\s+[\w$]+\s*\([^)]*\)\s*\{|\b(?:get|set)\s*(?:\([^)]*\)\s*\{|:)|\b(?:toString|valueOf|join|toJSON)\s*(?:\([^)]*\)\s*\{|:|=(?![=>]))|"
+    r"toPrimitive|Symbol|\bObject\s*\.\s*(?:create|assign)\b|\b(?:URL|Date|Blob|Array|String|Object)\s*\[")
 
 
 def download_clicks(data):
@@ -796,8 +796,8 @@ def selftest():
         "﻿" + doc(),  # BOM is stripped by read_html; check_html itself must also tolerate the plain doc
     ]
     dl = ('<script>document.getElementById("b").addEventListener("click", () => {\n  const blob = new Blob(["a,b"], { type: "text/csv" });\n'
-          '  const url = URL.createObjectURL(blob);\n  const a = document.createElement("a");\n'
-          '  a.download = `report-${new Date().toISOString().slice(0, 10)}.csv`;\n  a.href = url;\n  a.click();\n  URL.revokeObjectURL(url);\n})</script>')
+          '  const stamp = new Date().toISOString().slice(0, 10);\n  const url = URL.createObjectURL(blob);\n  const a = document.createElement("a");\n'
+          '  a.download = `report-${stamp}.csv`;\n  a.href = url;\n  a.click();\n  URL.revokeObjectURL(url);\n})</script>')
     good += [
         doc(f'<button id=b>Export</button>{dl}'),  # the standard CSV export
         doc('<script>const csv="a,b";const link=document.createElement("a");link.setAttribute("download","r.csv");'
@@ -948,6 +948,13 @@ def selftest():
         doc(f'<script>const a=document.createElement("a");a.download="x";a.style.color=(a.addEventListener("click",()=>{{}}),"red");a.href=URL.createObjectURL(b);a.click()</script>'): ".click",
         doc('<script>const a=document.createElement("a");a.download="x";a.href=URL.createObjectURL(b && (document.body.appendChild(a), b));a.click()</script>'): ".click",
         doc('<script>const a=document.createElement("a");a.download=`${f()}.csv`;a.href=URL.createObjectURL(b);a.click()</script>'): ".click",
+        doc('<script>Date[atob("cHJvdG90eXBl")].toISOString=function(){document.body.appendChild(a);return "x"};'
+            'const a=document.createElement("a");a.download=`${new Date().toISOString()}`;a.href=URL.createObjectURL(b);a.click()</script>'): ".click",
+        doc('<script>const r=Object.create({},{n:{get(){document.body.appendChild(a);return "x"}}});'
+            'const a=document.createElement("a");a.download=`${r.n}`;a.href=URL.createObjectURL(b);a.click()</script>'): ".click",
+        doc('<script>const n=Object.create({},{toString:{value(){document.body.appendChild(a);return "x"}}});'
+            'const a=document.createElement("a");a.download=`${n}`;a.href=URL.createObjectURL(b);a.click()</script>'): ".click",
+        doc('<script>const a=document.createElement("a");a.href=URL.createObjectURL(b);a.download=`${x}`;a.click()</script>'): ".click",
         doc('<script>const o={get n(){document.body.appendChild(a);return "x"}};const a=document.createElement("a");a.download=`${o.n}`;a.href=URL.createObjectURL(b);a.click()</script>'): ".click",
         doc('<script>const r={toString(){document.body.appendChild(a);return ""}};const a=document.createElement("a");a.download="x";a.href=URL.createObjectURL(new Blob([r]));a.click()</script>'): ".click",
         doc(f'<script>Object.defineProperty(HTMLAnchorElement.prototype,"href",{{set(){{}}}});const a=document.createElement("a");a.download="x";a.href=URL.createObjectURL(b);a.click()</script>'): ".click",
