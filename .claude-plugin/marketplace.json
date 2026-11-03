@@ -10,7 +10,7 @@
     {
       "name": "aipm-compliance",
       "source": "./plugins/aipm-compliance",
-      "description": "Confidentiality legend rule for every AI-made Advanced IPM deliverable, checked before hand-off"
+      "description": "Confidentiality legend and no-egress rules for every AI-made Advanced IPM deliverable, checked before hand-off"
     }
   ]
 }
