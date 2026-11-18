@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exit 0 if each file carries the AIPM confidentiality legend (or the external opt-out), else 1.
+"""Exit 0 if each file carries an AIPM confidentiality legend (internal or customer) or the public token, else 1.
 
 Stdlib only. docx/pptx/xlsx: text from the OOXML parts. pdf: pdftotext when present,
 plus raw bytes (catches the metadata Keywords token). html/md/txt: the text itself.
@@ -7,8 +7,11 @@ plus raw bytes (catches the metadata Keywords token). html/md/txt: the text itse
 import re, shutil, subprocess, sys, zipfile
 from pathlib import Path
 
-LEGEND = re.compile(r"CONFIDENTIAL\s*[–—-]\s*FOR INTERNAL USE ONLY", re.I)
-TOKENS = re.compile(r"AIPM-CONFIDENTIAL-INTERNAL|aipm-audience:\s*external|AIPM-EXTERNAL", re.I)
+# Keep in sync with LEGEND in hooks/register.ts.
+LEGEND = re.compile(r"CONFIDENTIAL\s*[–—-]\s*(FOR INTERNAL USE ONLY|PREPARED FOR\b)", re.I)
+# Metadata tokens. A token alone passes: without pdftotext a PDF's text is compressed and only Keywords is readable.
+# AIPM-EXTERNAL / aipm-audience: external are pre-1.3.0 spellings of AIPM-PUBLIC.
+TOKENS = re.compile(r"AIPM-CONFIDENTIAL-(INTERNAL|CUSTOMER)|AIPM-PUBLIC|AIPM-EXTERNAL|aipm-audience:\s*external", re.I)
 OOXML = re.compile(r"^(word/(document|header\d*|footer\d*)|ppt/(slides|slideMasters|slideLayouts|notesSlides)/.*|xl/(sharedStrings|worksheets/.*)|docProps/(core|custom))\.xml$")
 
 
@@ -43,5 +46,8 @@ if __name__ == "__main__":
         assert ok("x CONFIDENTIAL – FOR INTERNAL USE ONLY y") and ok("confidential - for internal use only")
         assert ok("<!-- aipm-audience: external -->") and ok("/Keywords (AIPM-CONFIDENTIAL-INTERNAL)")
         assert not ok("Confidential draft")
+        assert ok("CONFIDENTIAL – PREPARED FOR ACME SCHOOL DISTRICT") and ok("/Keywords (AIPM-CONFIDENTIAL-CUSTOMER)")
+        assert ok("<!-- AIPM-PUBLIC -->") and ok("<!-- AIPM-EXTERNAL -->")
+        assert not ok("Prepared for Acme")
         print("selftest ok"); sys.exit(0)
     sys.exit(main(sys.argv[1:]))
