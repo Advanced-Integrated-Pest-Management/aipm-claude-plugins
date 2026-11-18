@@ -2,7 +2,8 @@ import type { Register } from 'claude-code'
 
 // Must match skills/confidential-legend/SKILL.md + scripts/check_legend.py
 // and skills/no-egress/SKILL.md + scripts/check_egress.py.
-const LEGEND = /CONFIDENTIAL\s*[–—-]\s*FOR INTERNAL USE ONLY|AIPM-CONFIDENTIAL-INTERNAL|aipm-audience:\s*external/i
+// LEGEND mirrors LEGEND + TOKENS in check_legend.py (HTML is checked here at Write time, before it is on disk).
+const LEGEND = /CONFIDENTIAL\s*[–—-]\s*(FOR INTERNAL USE ONLY|PREPARED FOR\b)|AIPM-CONFIDENTIAL-(INTERNAL|CUSTOMER)|AIPM-PUBLIC|AIPM-EXTERNAL|aipm-audience:\s*external/i
 const HTML = /\.html?$/i
 const DELIVERABLE = /\.(html?|docx|pptx|xlsx|pdf)$/i
 // Everything check_egress.py has a verdict for, including the formats it refuses outright (svg, server-side includes, mhtml,
@@ -14,7 +15,7 @@ const TIMEOUT_MS = 120_000 // a 20 MB page or a qpdf expansion can take seconds;
 
 const legendWhy = (paths: string[]) =>
   `aipm-compliance: ${paths.join(', ')} lacks the Advanced IPM confidentiality legend. ` +
-  `Add it per the confidential-legend skill (or mark it external if customer-facing), then retry.`
+  `Add the internal or customer legend per the confidential-legend skill, or the public token for public material, then retry.`
 const egressWhy = (detail: string) =>
   `aipm-compliance: the file can send data out or its no-egress guard cannot be proven:\n${detail}\n` +
   `Fix the generator per the no-egress skill (generated head block, pinned providers, no network/navigation/storage APIs), then retry.`
